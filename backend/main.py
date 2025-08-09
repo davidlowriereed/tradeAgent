@@ -183,3 +183,28 @@ async def coinbase_ws():
                                 best_bid = float(msg["best_bid"])
                             if msg.get("best_ask") is not None:
                                 best_ask = float(msg["best_ask"])
+                        except Exception:
+                            pass
+        except Exception:
+            await asyncio.sleep(2)
+
+async def db_flush_loop():
+    while True:
+        try:
+            if DB_URL and pg_conn is None:
+                await pg_connect()
+            if DB_URL and pg_conn:
+                batch = []
+                while db_buffer and len(batch) < 1000:
+                    batch.append(db_buffer.popleft())
+                if batch:
+                    pg_insert_many(batch)
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+
+@app.on_event("startup")
+async def startup_event():
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
+    asyncio.create_task(coinbase_ws())
+    asyncio.create_task(db_flush_loop())
