@@ -7,3 +7,4 @@ flask
 flask-cors
 requests
 psycopg2-binary
+httpx==0.28.1
