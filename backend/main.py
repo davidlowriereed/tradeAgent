@@ -28,7 +28,8 @@ async def pg_connect():
         import psycopg2
         pg_conn = psycopg2.connect(DB_URL)
         pg_conn.autocommit = True
-                with pg_conn.cursor() as cur:
+        with pg_conn.cursor() as cur:
+                    
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trades_crypto (
