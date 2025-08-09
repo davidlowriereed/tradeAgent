@@ -6,6 +6,7 @@ import os
 import time
 from collections import defaultdict, deque
 from typing import Dict, Deque, Tuple, Optional
+import httpx
 
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -82,6 +83,18 @@ app = FastAPI()
 # tiny HTML page
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape())
+
+@app.get("/test-alert")
+async def test_alert():
+    url = os.getenv("ALERT_WEBHOOK_URL")
+    if not url:
+        return {"ok": False, "reason": "ALERT_WEBHOOK_URL not set"}
+    msg = {"text": "✅ Test alert from Opportunity Radar", "content": "✅ Test alert from Opportunity Radar"}
+    try:
+        await httpx.AsyncClient(timeout=10).post(url, json=msg)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @app.get("/health")
 async def health():
