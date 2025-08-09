@@ -7,3 +7,4 @@ psycopg2-binary
 httpx==0.28.1
 orjson==3.11.1
 ujson==5.10.0
+openai>=1.40.0
