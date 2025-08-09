@@ -1,152 +1,185 @@
-from flask import Flask, jsonify, send_file
-from flask_cors import CORS
-import os
-import requests
-import psycopg2
+import asyncio
 import csv
 import io
-from datetime import datetime
+import json
+import os
+import time
+from collections import deque
 
-app = Flask(__name__)
-CORS(app)
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+import websockets
 
-SYMBOL = os.getenv("SYMBOL", "BTC-USD")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Postgres connection string
+DB_URL = os.getenv("DATABASE_URL", None)
 
-trade_cache = []
+# Optional Postgres (lazy import so app runs without it)
+pg_conn = None
 
-# -----------------------------
-# DB connection helper
-# -----------------------------
-def get_db_connection():
-    if not DATABASE_URL:
+async def pg_connect():
+    """Connect and create table if needed."""
+    global pg_conn
+    if DB_URL is None:
         return None
-    return psycopg2.connect(DATABASE_URL)
-
-# Create table if not exists
-def init_db():
-    conn = get_db_connection()
-    if conn:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS trades_crypto (
-                id SERIAL PRIMARY KEY,
-                symbol TEXT,
-                price NUMERIC,
-                size NUMERIC,
-                side TEXT,
-                ts TIMESTAMP
-            )
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-
-# -----------------------------
-# Fetch live trades
-# -----------------------------
-def fetch_trades():
-    url = f"https://api.exchange.coinbase.com/products/{SYMBOL}/trades"
-    resp = requests.get(url, timeout=5)
-    data = resp.json()
-    trades = []
-    for t in data:
-        trade = {
-            "price": float(t["price"]),
-            "size": float(t["size"]),
-            "side": t["side"],
-            "time": t["time"]
-        }
-        trades.append(trade)
-    return trades
-
-# -----------------------------
-# Store trades in DB
-# -----------------------------
-def store_trades(trades):
-    conn = get_db_connection()
-    if not conn:
-        return
-    cur = conn.cursor()
-    for t in trades:
-        cur.execute(
-            "INSERT INTO trades_crypto (symbol, price, size, side, ts) VALUES (%s, %s, %s, %s, %s)",
-            (SYMBOL, t["price"], t["size"], t["side"], datetime.fromisoformat(t["time"].replace("Z", "+00:00")))
-        )
-    conn.commit()
-    cur.close()
-    conn.close()
-
-# -----------------------------
-# Routes
-# -----------------------------
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "symbol": SYMBOL,
-        "trades_cached": len(trade_cache)
-    })
-
-@app.route("/db-health")
-def db_health():
     try:
-        conn = get_db_connection()
-        if conn:
-            conn.close()
-            return jsonify({"db": "ok"})
-        else:
-            return jsonify({"db": "not configured"})
-    except Exception as e:
-        return jsonify({"db": "error", "detail": str(e)})
+        import psycopg2
+        pg_conn = psycopg2.connect(DB_URL)
+        pg_conn.autocommit = True
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trades_crypto (
+                    id BIGSERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_utc TIMESTAMPTZ NOT NULL,
+                    price DOUBLE PRECISION,
+                    size DOUBLE PRECISION,
+                    side TEXT
+                );
+                """
+            )
+        return pg_conn
+    except Exception:
+        pg_conn = None
+        return None
 
-@app.route("/signals")
-def signals():
-    global trade_cache
-    trades = fetch_trades()
-    trade_cache.extend(trades)
-    trade_cache = trade_cache[-500:]  # limit cache size
+def pg_insert_many(rows):
+    if pg_conn is None or not rows:
+        return
+    try:
+        from psycopg2.extras import execute_values
+        with pg_conn.cursor() as cur:
+            execute_values(
+                cur,
+                "INSERT INTO trades_crypto (symbol, ts_utc, price, size, side) VALUES %s",
+                rows,
+            )
+    except Exception:
+        # best-effort logging in alpha
+        pass
 
-    if DATABASE_URL:
-        store_trades(trades)
+# ---------------- In-memory state ----------------
+TICKER = os.getenv("SYMBOL", "BTC-USD")
+WS_URL = "wss://ws-feed.exchange.coinbase.com"
 
-    # Simple example signal
-    cvd = sum(t["size"] if t["side"] == "buy" else -t["size"] for t in trade_cache)
+MAX_TICKS = 5000
+trades = deque(maxlen=MAX_TICKS)      # (ts_epoch, price, size, side)
+cvd = 0.0
+rv_window_secs = 300                   # 5 minutes
+history_volumes = deque(maxlen=48)     # 4 hours of 5-min vols
 
-    return jsonify({
-        "symbol": SYMBOL,
-        "cvd": round(cvd, 4),
-        "trades_cached": len(trade_cache)
-    })
+best_bid = None
+best_ask = None
 
-@app.route("/export-csv")
-def export_csv():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"error": "No database configured"}), 400
-    cur = conn.cursor()
-    cur.execute("SELECT symbol, price, size, side, ts FROM trades_crypto ORDER BY id DESC LIMIT 1000")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+# buffer for DB inserts
+db_buffer = deque(maxlen=20000)
 
+app = FastAPI()
+
+# tiny HTML dashboard with Jinja
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+env = Environment(loader=FileSystemLoader(TEMPLATE_DIR),
+                  autoescape=select_autoescape())
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "symbol": TICKER, "trades_cached": len(trades)}
+
+@app.get("/db-health")
+async def db_health():
+    if DB_URL is None:
+        return {"db": "not-configured"}
+    ok = False
+    try:
+        if pg_conn is None:
+            await pg_connect()
+        if pg_conn:
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+                cur.fetchone()
+                ok = True
+    except Exception:
+        ok = False
+    return {"db": "ok" if ok else "error"}
+
+@app.get("/signals")
+async def signals():
+    now = time.time()
+    cutoff = now - rv_window_secs
+    vol_5m = sum(size for ts, _, size, _ in trades if ts >= cutoff)
+    baseline = sorted(history_volumes)
+    baseline_med = baseline[len(baseline)//2] if baseline else 0.0
+    rvol = (vol_5m / baseline_med) if baseline_med > 0 else None
+
+    payload = {
+        "symbol": TICKER,
+        "cvd": cvd,
+        "volume_5m": vol_5m,
+        "rvol_vs_recent": rvol,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "trades_cached": len(trades),
+        "timestamp": now
+    }
+    return JSONResponse(payload)
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    template = env.get_template("index.html")
+    return template.render(symbol=TICKER)
+
+@app.get("/export-csv")
+async def export_csv(n: int = 2000):
+    n = max(1, min(n, len(trades)))
     output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["symbol", "price", "size", "side", "ts"])
-    for row in rows:
-        writer.writerow(row)
+    w = csv.writer(output)
+    w.writerow(["ts_epoch","price","size","side"])
+    for row in list(trades)[-n:]:
+        w.writerow(row)
+    output.seek(0)
+    return StreamingResponse(output, media_type="text/csv",
+                             headers={"Content-Disposition":"attachment; filename=trades.csv"})
 
-    mem = io.BytesIO()
-    mem.write(output.getvalue().encode("utf-8"))
-    mem.seek(0)
-    output.close()
+async def coinbase_ws():
+    global cvd, best_bid, best_ask
+    while True:
+        try:
+            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
+                sub = {"type":"subscribe","product_ids":[TICKER],"channels":["matches","ticker"]}
+                await ws.send(json.dumps(sub))
+                last_period = int(time.time() // rv_window_secs)
 
-    return send_file(mem, mimetype="text/csv", as_attachment=True, download_name="trades.csv")
+                async for raw in ws:
+                    msg = json.loads(raw)
 
-# -----------------------------
-# Init
-# -----------------------------
-if __name__ == "__main__":
-    if DATABASE_URL:
-        init_db()
-    app.run(host="0.0.0.0", port=8080)
+                    if msg.get("type") == "match":
+                        ts = time.time()
+                        size = float(msg.get("size", 0) or 0)
+                        side = msg.get("side")
+                        price = float(msg.get("price", 0) or 0)
+                        trades.append((ts, price, size, side))
+
+                        # CVD
+                        if side == "buy":
+                            cvd += size
+                        elif side == "sell":
+                            cvd -= size
+
+                        # DB buffer row (ISO UTC)
+                        if DB_URL:
+                            db_buffer.append((TICKER, time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ts)), price, size, side))
+
+                        # roll 5-min volume median history
+                        current_period = int(ts // rv_window_secs)
+                        if current_period != last_period:
+                            cutoff = ts - rv_window_secs
+                            vol_5m = sum(s for t,_,s,_ in trades if t >= cutoff)
+                            history_volumes.append(vol_5m)
+                            last_period = current_period
+
+                    elif msg.get("type") == "ticker":
+                        try:
+                            if msg.get("best_bid") is not None:
+                                best_bid = float(msg["best_bid"])
+                            if msg.get("best_ask") is not None:
+                                best_ask = float(msg["best_ask"])
