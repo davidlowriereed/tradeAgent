@@ -11,6 +11,10 @@
     .label { color:#6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;}
     .value { font-size: 20px; font-weight: 700; margin-top: 6px; }
     .row { display:flex; gap:12px; align-items:center; margin-bottom: 16px; }
+    .pill { display:inline-flex; align-items:center; gap:8px; font-size:12px; padding:4px 8px; border-radius:999px; }
+    .ok { background:#e8faf0; color:#107a3d; }
+    .warn { background:#fff5e5; color:#92400e; }
+    .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
   </style>
 </head>
 <body>
@@ -25,81 +29,124 @@
     <div class="card"><div class="label">Best Bid / Ask</div><div class="value"><span id="bid">—</span> / <span id="ask">—</span></div></div>
     <div class="card"><div class="label">Trades Cached</div><div id="cached" class="value">—</div></div>
   </div>
-  
+
   <div style="margin-top:24px;">
-  <h3>Latest Findings</h3>
-  <div id="findings" class="card" style="max-height:300px; overflow:auto;"></div>
-</div>
+    <h3>Latest Findings</h3>
+    <div id="findings" class="card" style="max-height:300px; overflow:auto;"></div>
+  </div>
+
+  <!-- NEW: Agent Health -->
+  <div style="margin-top:24px;">
+    <h3>Agent Health</h3>
+    <div id="agents" class="grid"></div>
+    <div class="label" style="margin-top:8px;">
+      Status = OK if the agent has reported in within the last 2 minutes.
+    </div>
+  </div>
 
   <div style="margin-top:12px;">
-    API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a>
+    API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a> · Agents: <a href="/agents">/agents</a>
   </div>
 
   <script>
-  // --- utils -------------------------------------------------
-  const nf = (opts={}) => new Intl.NumberFormat('en-US', opts);
-  const fmt = (n, opts) => (Number.isFinite(+n) ? nf(opts).format(+n) : '—');
-  const fmt2 = n => fmt(n, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const fmt4 = n => fmt(n, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+    // --- utils -------------------------------------------------
+    const nf = (opts={}) => new Intl.NumberFormat('en-US', opts);
+    const fmt = (n, opts) => (Number.isFinite(+n) ? nf(opts).format(+n) : '—');
+    const fmt2 = n => fmt(n, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const fmt4 = n => fmt(n, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+    const pad = n => String(n).padStart(2,'0');
 
-  function renderFinding(f){
-    const base = `<b>${f.agent}</b> · <code>${f.label}</code> · score ${fmt2(f.score)}
-                  <div style="color:#555;">${f.ts_utc}</div>`;
-    if (f.label === 'llm_analysis' && f.details) {
-      const d = f.details || {};
-      const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
-        ? `<ul style="margin:6px 0 0 20px;">
-             ${d.tweaks.map(t=>`<li><code>${t.param}</code>: Δ ${t.delta} — ${t.reason}</li>`).join('')}
-           </ul>` : '';
-      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
-        ${base}
-        <div>Action: <b>${(d.action||'observe')}</b> (conf ${fmt2(d.confidence)})</div>
-        <div style="color:#333;">${String(d.rationale||'').replace(/</g,'&lt;')}</div>
-        ${tweaks}
-      </div>`;
+    function timeAgo(iso) {
+      const t = new Date(iso).getTime();
+      if (!t) return '—';
+      const s = Math.floor((Date.now() - t) / 1000);
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s/60); if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m/60); return `${h}h ${m%60}m ago`;
     }
-    return `<div style="padding:6px 0; border-bottom:1px solid #eee;">${base}</div>`;
-  }
 
-  async function loadFindings() {
-    const sym = document.getElementById('symbol').value;
-    const res = await fetch(`/findings?symbol=${encodeURIComponent(sym)}&limit=20`).then(r=>r.json());
-    const box = document.getElementById('findings');
-    const arr = res.findings || [];
-    box.innerHTML = arr.length ? arr.map(renderFinding).join('') : '—';
-  }
+    function renderFinding(f){
+      const base = `<b>${f.agent}</b> · <code>${f.label}</code> · score ${fmt2(f.score)}
+                    <div style="color:#555;">${f.ts_utc}</div>`;
+      if (f.label === 'llm_analysis' && f.details) {
+        const d = f.details || {};
+        const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
+          ? `<ul style="margin:6px 0 0 20px;">
+               ${d.tweaks.map(t=>`<li><code>${t.param}</code>: Δ ${t.delta} — ${t.reason}</li>`).join('')}
+             </ul>` : '';
+        return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
+          ${base}
+          <div>Action: <b>${(d.action||'observe')}</b> (conf ${fmt2(d.confidence)})</div>
+          <div style="color:#333;">${String(d.rationale||'').replace(/</g,'&lt;')}</div>
+          ${tweaks}
+        </div>`;
+      }
+      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">${base}</div>`;
+    }
 
-  async function poll(force=false) {
-    const sym = document.getElementById('symbol').value;
-    const res = await fetch(`/signals?symbol=${encodeURIComponent(sym)}`).then(r=>r.json());
+    async function loadFindings() {
+      const sym = document.getElementById('symbol').value;
+      const res = await fetch(`/findings?symbol=${encodeURIComponent(sym)}&limit=20`).then(r=>r.json());
+      const box = document.getElementById('findings');
+      const arr = res.findings || [];
+      box.innerHTML = arr.length ? arr.map(renderFinding).join('') : '—';
+    }
 
-    // number formatting with commas
-    document.getElementById('cvd').textContent     = fmt4(res.cvd);
-    document.getElementById('vol').textContent     = fmt2(res.volume_5m);
-    document.getElementById('rvol').textContent    = Number.isFinite(+res.rvol_vs_recent) ? `${fmt2(res.rvol_vs_recent)}x` : '—';
-    document.getElementById('bid').textContent     = fmt2(res.best_bid);
-    document.getElementById('ask').textContent     = fmt2(res.best_ask);
-    document.getElementById('cached').textContent  = fmt(res.trades_cached, { maximumFractionDigits: 0 });
+    async function loadAgents() {
+      try {
+        const res = await fetch('/agents').then(r=>r.json());
+        const box = document.getElementById('agents');
+        const items = res.agents || [];
+        const now = Date.now();
+        box.innerHTML = items.map(a => {
+          const last = new Date(a.last_run).getTime();
+          const fresh = last && (now - last) <= 120_000; // 2 minutes
+          const klass = fresh ? 'pill ok' : 'pill warn';
+          const label = fresh ? 'OK' : 'STALE';
+          return `<div class="card">
+            <div class="label">Agent</div>
+            <div class="value" style="margin-bottom:8px;">${a.agent}</div>
+            <div><span class="${klass}"><span class="dot"></span>${label}</span></div>
+            <div style="margin-top:8px;">Last run: ${a.last_run ? timeAgo(a.last_run) : '—'}</div>
+          </div>`;
+        }).join('') || '<div class="card">No agent heartbeats yet.</div>';
+      } catch (_) {
+        document.getElementById('agents').innerHTML = '<div class="card">Unable to load agent status.</div>';
+      }
+    }
 
-    if (!force) loadFindings();
-    setTimeout(poll, 1500);
-  }
+    async function poll(force=false) {
+      const sym = document.getElementById('symbol').value;
+      const res = await fetch(`/signals?symbol=${encodeURIComponent(sym)}`).then(r=>r.json());
 
-  async function init() {
-    const h = await fetch('/health').then(r=>r.json());
-    const sel = document.getElementById('symbol');
-    (h.symbols || []).forEach(s => {
-      const o = document.createElement('option');
-      o.value = s; o.textContent = s; sel.appendChild(o);
-    });
-    sel.value = (h.symbols && h.symbols[0]) || 'BTC-USD';
-    loadFindings();
-    poll();
-    sel.addEventListener('change', ()=> poll(true));
-  }
+      // number formatting with commas
+      document.getElementById('cvd').textContent     = fmt4(res.cvd);
+      document.getElementById('vol').textContent     = fmt2(res.volume_5m);
+      document.getElementById('rvol').textContent    = Number.isFinite(+res.rvol_vs_recent) ? `${fmt2(res.rvol_vs_recent)}x` : '—';
+      document.getElementById('bid').textContent     = fmt2(res.best_bid);
+      document.getElementById('ask').textContent     = fmt2(res.best_ask);
+      document.getElementById('cached').textContent  = fmt(res.trades_cached, { maximumFractionDigits: 0 });
 
-  init();
-</script>
+      if (!force) loadFindings();
+      setTimeout(poll, 1500);
+    }
 
+    async function init() {
+      const h = await fetch('/health').then(r=>r.json());
+      const sel = document.getElementById('symbol');
+      (h.symbols || []).forEach(s => {
+        const o = document.createElement('option');
+        o.value = s; o.textContent = s; sel.appendChild(o);
+      });
+      sel.value = (h.symbols && h.symbols[0]) || 'BTC-USD';
+      loadFindings();
+      loadAgents();
+      poll();
+      sel.addEventListener('change', ()=> poll(true));
+      setInterval(loadAgents, 15_000); // refresh agent cards every 15s
+    }
+
+    init();
+  </script>
 </body>
 </html>
