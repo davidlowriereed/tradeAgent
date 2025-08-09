@@ -1,0 +1,13 @@
+spec:
+  name: opportunity-radar-alpha
+  services:
+    - name: api
+      dockerfile_path: Dockerfile
+      source_dir: /
+      http_port: 8080
+      instance_count: 1
+      instance_size_slug: basic-xxs
+      envs:
+        - key: SYMBOL
+          scope: RUN_AND_BUILD_TIME
+          value: "BTC-USD"
