@@ -70,13 +70,7 @@ async def pg_connect():
     except Exception:
         pg_conn = None
         return None
-
-AGENTS = [
-    RVOLSpikeAgent(), 
-    CVDDivergenceAgent(),
-    MacroWatcher(),          # harmless if MACRO_FEED_URL isn’t set
-]
-
+        
 class Agent:
     name: str
     interval_sec: int
@@ -110,7 +104,6 @@ class RVOLSpikeAgent(Agent):
             }
             return {"score": score, "label": label, "details": details}
         return None
-
 
 class CVDDivergenceAgent(Agent):
     """Trap Spotter v0 — price up while CVD down (or reverse) over ~2 minutes."""
@@ -178,6 +171,11 @@ class MacroWatcher(Agent):
             pass
         return None
 
+AGENTS = [
+    RVOLSpikeAgent(), 
+    CVDDivergenceAgent(),
+    MacroWatcher(),          # harmless if MACRO_FEED_URL isn’t set
+]
 
 def pg_insert_many(rows):
     if pg_conn is None or not rows:
