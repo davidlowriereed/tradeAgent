@@ -27,7 +27,7 @@ async def pg_connect():
         import psycopg2
         pg_conn = psycopg2.connect(DB_URL)
         pg_conn.autocommit = True
-        with pg_conn.cursor() as cur:
+                with pg_conn.cursor() as cur:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trades_crypto (
@@ -37,6 +37,30 @@ async def pg_connect():
                     price DOUBLE PRECISION,
                     size DOUBLE PRECISION,
                     side TEXT
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS findings (
+                    id BIGSERIAL PRIMARY KEY,
+                    agent TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    ts_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    score DOUBLE PRECISION NOT NULL,
+                    label TEXT NOT NULL,
+                    details JSONB DEFAULT '{}'::jsonb
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id BIGSERIAL PRIMARY KEY,
+                    agent TEXT NOT NULL,
+                    ts_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    status TEXT NOT NULL,
+                    note TEXT
                 );
                 """
             )
