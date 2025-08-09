@@ -16,11 +16,7 @@ import websockets
 DB_URL = os.getenv("DATABASE_URL", None)
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD")).split(",") if s.strip()]
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
-AGENTS = [
-    RVOLSpikeAgent(), 
-    CVDDivergenceAgent(),
-    MacroWatcher(),          # harmless if MACRO_FEED_URL isn’t set
-]
+
 
 # ---------- Optional Postgres ----------
 pg_conn = None
@@ -73,6 +69,12 @@ async def pg_connect():
     except Exception:
         pg_conn = None
         return None
+
+AGENTS = [
+    RVOLSpikeAgent(), 
+    CVDDivergenceAgent(),
+    MacroWatcher(),          # harmless if MACRO_FEED_URL isn’t set
+]
 
 class Agent:
     name: str
