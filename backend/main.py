@@ -16,6 +16,11 @@ import websockets
 DB_URL = os.getenv("DATABASE_URL", None)
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD")).split(",") if s.strip()]
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
+AGENTS = [
+    RVOLSpikeAgent(), 
+    CVDDivergenceAgent(),
+    MacroWatcher(),          # harmless if MACRO_FEED_URL isn’t set
+]
 
 # ---------- Optional Postgres ----------
 pg_conn = None
@@ -68,6 +73,108 @@ async def pg_connect():
     except Exception:
         pg_conn = None
         return None
+
+class Agent:
+    name: str
+    interval_sec: int
+
+    def __init__(self, name, interval_sec=10):
+        self.name = name
+        self.interval_sec = interval_sec
+
+    async def run_once(self, symbol) -> Optional[dict]:
+        """Return a finding dict or None."""
+        raise NotImplementedError
+
+class RVOLSpikeAgent(Agent):
+    """Manipulation Hunter v0 — flags high relative volume bursts."""
+    def __init__(self, min_rvol=2.5, interval_sec=10):
+        super().__init__("rvol_spike", interval_sec)
+        self.min_rvol = float(os.getenv("AGENT_RVOL_MIN", str(min_rvol)))
+
+    async def run_once(self, symbol):
+        # reuse compute_signals() for per-symbol features
+        sig = compute_signals(symbol)
+        rvol = sig.get("rvol_vs_recent") or 0.0
+        if rvol >= self.min_rvol and sig["volume_5m"] > 0:
+            score = min(10.0, rvol)  # simple score
+            label = "rvol_spike"
+            details = {
+                "rvol": rvol,
+                "volume_5m": sig["volume_5m"],
+                "best_bid": sig["best_bid"],
+                "best_ask": sig["best_ask"],
+            }
+            return {"score": score, "label": label, "details": details}
+        return None
+
+
+class CVDDivergenceAgent(Agent):
+    """Trap Spotter v0 — price up while CVD down (or reverse) over ~2 minutes."""
+    def __init__(self, window_sec=120, min_abs_cvd=25.0, min_price_bps=10, interval_sec=10):
+        super().__init__("cvd_divergence", interval_sec)
+        self.win = int(os.getenv("AGENT_CVD_WIN_SEC", str(window_sec)))
+        self.min_abs_cvd = float(os.getenv("AGENT_CVD_MIN", str(min_abs_cvd)))
+        self.min_price_bps = float(os.getenv("AGENT_CVD_MIN_BPS", str(min_price_bps)))
+
+    async def run_once(self, symbol):
+        # snapshot window
+        now = time.time()
+        window = [row for row in trades[symbol] if row[0] >= now - self.win]
+        if len(window) < 10:
+            return None
+
+        p0 = window[0][1]
+        p1 = window[-1][1]
+        price_change_bps = (p1 - p0) / p0 * 1e4  # basis points
+
+        # CVD delta over the window
+        # (approx: recompute CVD delta from subset instead of whole deque)
+        cvd_delta = 0.0
+        for _, _, size, side in window:
+            if side == "buy":
+                cvd_delta += size
+            elif side == "sell":
+                cvd_delta -= size
+
+        # Divergence: price ↑ & CVD ↓  OR price ↓ & CVD ↑
+        diverges = (price_change_bps > self.min_price_bps and cvd_delta < -self.min_abs_cvd) or \
+                   (price_change_bps < -self.min_price_bps and cvd_delta > self.min_abs_cvd)
+
+        if diverges:
+            score = min(10.0, abs(price_change_bps) / self.min_price_bps + abs(cvd_delta) / self.min_abs_cvd)
+            label = "cvd_divergence"
+            details = {
+                "price_bps": price_change_bps,
+                "cvd_delta": cvd_delta,
+                "window_sec": self.win
+            }
+            return {"score": score, "label": label, "details": details}
+        return None
+
+class MacroWatcher(Agent):
+    def __init__(self, interval_sec=600):
+        super().__init__("macro_watcher", interval_sec)
+        self.url = os.getenv("MACRO_FEED_URL")
+
+    async def run_once(self, symbol):
+        if not self.url: 
+            return None
+        try:
+            import httpx, re, datetime
+            r = await httpx.AsyncClient(timeout=10).get(self.url)
+            text = r.text[:100000]
+            # naive parse for items (works for many RSS feeds)
+            items = []
+            for m in re.finditer(r"<item>.*?<title>(.*?)</title>.*?</item>", text, re.S):
+                title = re.sub("<.*?>","",m.group(1))
+                items.append(title.strip())
+            if items:
+                return {"score": 1.0, "label": "macro_update", "details": {"items": items[:5]}}
+        except Exception:
+            pass
+        return None
+
 
 def pg_insert_many(rows):
     if pg_conn is None or not rows:
@@ -132,6 +239,33 @@ app = FastAPI()
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape())
 
+async def agents_loop():
+    while True:
+        try:
+            if DB_URL and pg_conn is None:
+                await pg_connect()
+
+            for agent in AGENTS:
+                for sym in SYMBOLS:
+                    try:
+                        finding = await agent.run_once(sym)
+                        pg_agent_heartbeat(agent.name, "ok")
+                        if finding:
+                            pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
+
+                            # also push an alert if score is high
+                            if ALERT_WEBHOOK_URL and finding["score"] >= 2.0:  # tune this
+                                txt = f"🤖 {agent.name.upper()} | {sym} | {finding['label']} | score={finding['score']:.2f}"
+                                try:
+                                    await httpx.AsyncClient(timeout=10).post(ALERT_WEBHOOK_URL, json={"text": txt, "content": txt})
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        pg_agent_heartbeat(agent.name, "error", note=str(e)[:150])
+            await asyncio.sleep(5)
+        except Exception:
+            await asyncio.sleep(5)
+
 @app.get("/test-alert")
 async def test_alert():
     url = os.getenv("ALERT_WEBHOOK_URL")
@@ -192,6 +326,51 @@ async def signals(symbol: str = Query(None)):
 async def index(request: Request):
     template = env.get_template("index.html")
     return template.render(symbols=SYMBOLS)
+
+@app.get("/agents")
+async def agents_status():
+    # latest run per agent
+    if pg_conn is None:
+        await pg_connect()
+    rows = []
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute("""
+                SELECT agent, max(ts_utc) AS last_run
+                FROM agent_runs
+                GROUP BY agent
+                ORDER BY agent
+            """)
+            rows = cur.fetchall()
+    except Exception:
+        pass
+    return {"agents": [{"agent": a, "last_run": str(t)} for a,t in rows]}
+
+@app.get("/findings")
+async def get_findings(symbol: Optional[str]=None, agent: Optional[str]=None, limit: int=50):
+    if pg_conn is None:
+        await pg_connect()
+    result = []
+    try:
+        q = "SELECT ts_utc, agent, symbol, score, label, details FROM findings"
+        cond, vals = [], []
+        if symbol:
+            cond.append("symbol=%s"); vals.append(symbol)
+        if agent:
+            cond.append("agent=%s"); vals.append(agent)
+        if cond:
+            q += " WHERE " + " AND ".join(cond)
+        q += " ORDER BY ts_utc DESC LIMIT %s"; vals.append(max(1, min(limit, 200)))
+        with pg_conn.cursor() as cur:
+            cur.execute(q, vals)
+            for ts, a, s, sc, lb, det in cur.fetchall():
+                result.append({
+                    "ts_utc": str(ts), "agent": a, "symbol": s,
+                    "score": float(sc), "label": lb, "details": det
+                })
+    except Exception:
+        pass
+    return {"findings": result}
 
 @app.get("/export-csv")
 async def export_csv(symbol: str = Query(None), n: int = 2000):
@@ -308,3 +487,6 @@ async def startup_event():
         asyncio.create_task(coinbase_ws(sym))
     asyncio.create_task(db_flush_loop())
     asyncio.create_task(alert_loop())
+    asyncio.create_task(agents_loop())
+
+    
