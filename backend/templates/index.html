@@ -36,29 +36,52 @@
   </div>
 
   <script>
+  // --- utils -------------------------------------------------
+  const nf = (opts={}) => new Intl.NumberFormat('en-US', opts);
+  const fmt = (n, opts) => (Number.isFinite(+n) ? nf(opts).format(+n) : '—');
+  const fmt2 = n => fmt(n, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt4 = n => fmt(n, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+
+  function renderFinding(f){
+    const base = `<b>${f.agent}</b> · <code>${f.label}</code> · score ${fmt2(f.score)}
+                  <div style="color:#555;">${f.ts_utc}</div>`;
+    if (f.label === 'llm_analysis' && f.details) {
+      const d = f.details || {};
+      const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
+        ? `<ul style="margin:6px 0 0 20px;">
+             ${d.tweaks.map(t=>`<li><code>${t.param}</code>: Δ ${t.delta} — ${t.reason}</li>`).join('')}
+           </ul>` : '';
+      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
+        ${base}
+        <div>Action: <b>${(d.action||'observe')}</b> (conf ${fmt2(d.confidence)})</div>
+        <div style="color:#333;">${String(d.rationale||'').replace(/</g,'&lt;')}</div>
+        ${tweaks}
+      </div>`;
+    }
+    return `<div style="padding:6px 0; border-bottom:1px solid #eee;">${base}</div>`;
+  }
+
   async function loadFindings() {
     const sym = document.getElementById('symbol').value;
     const res = await fetch(`/findings?symbol=${encodeURIComponent(sym)}&limit=20`).then(r=>r.json());
     const box = document.getElementById('findings');
-    box.innerHTML = (res.findings||[]).map(f => `
-      <div style="padding:6px 0; border-bottom:1px solid #eee;">
-        <b>${f.agent}</b> · <code>${f.label}</code> · score ${Number(f.score).toFixed(2)}
-        <div style="color:#555;">${f.ts_utc}</div>
-      </div>
-    `).join('') || '—';
+    const arr = res.findings || [];
+    box.innerHTML = arr.length ? arr.map(renderFinding).join('') : '—';
   }
 
   async function poll(force=false) {
     const sym = document.getElementById('symbol').value;
     const res = await fetch(`/signals?symbol=${encodeURIComponent(sym)}`).then(r=>r.json());
-    document.getElementById('cvd').textContent   = (res.cvd ?? '—').toFixed ? res.cvd.toFixed(4) : res.cvd;
-    document.getElementById('vol').textContent   = (res.volume_5m ?? '—').toFixed ? res.volume_5m.toFixed(4) : res.volume_5m;
-    document.getElementById('rvol').textContent  = res.rvol_vs_recent ? `${res.rvol_vs_recent.toFixed(2)}x` : '—';
-    document.getElementById('bid').textContent   = res.best_bid ?? '—';
-    document.getElementById('ask').textContent   = res.best_ask ?? '—';
-    document.getElementById('cached').textContent= res.trades_cached ?? '—';
 
-    if (!force) loadFindings();   // <- keep findings fresh
+    // number formatting with commas
+    document.getElementById('cvd').textContent     = fmt4(res.cvd);
+    document.getElementById('vol').textContent     = fmt2(res.volume_5m);
+    document.getElementById('rvol').textContent    = Number.isFinite(+res.rvol_vs_recent) ? `${fmt2(res.rvol_vs_recent)}x` : '—';
+    document.getElementById('bid').textContent     = fmt2(res.best_bid);
+    document.getElementById('ask').textContent     = fmt2(res.best_ask);
+    document.getElementById('cached').textContent  = fmt(res.trades_cached, { maximumFractionDigits: 0 });
+
+    if (!force) loadFindings();
     setTimeout(poll, 1500);
   }
 
@@ -70,12 +93,13 @@
       o.value = s; o.textContent = s; sel.appendChild(o);
     });
     sel.value = (h.symbols && h.symbols[0]) || 'BTC-USD';
-    loadFindings();               // <- load once immediately
+    loadFindings();
     poll();
     sel.addEventListener('change', ()=> poll(true));
   }
 
   init();
 </script>
+
 </body>
 </html>
