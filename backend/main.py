@@ -4,6 +4,7 @@ import io
 import json
 import os
 import time
+import re
 from collections import defaultdict, deque
 from typing import Dict, Deque, Tuple, Optional
 import httpx
@@ -484,6 +485,25 @@ AGENTS = [
     LLMAnalystAgent(),       # only active if LLM_ENABLE=true and key present
 ]
 
+LLM_ALERT_MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
+ALERT_RATIONALE_CHARS = int(os.getenv("ALERT_RATIONALE_CHARS", "280"))
+
+def _clean_text(s: str) -> str:
+    if not s:
+        return ""
+    # strip HTML and trim
+    s = re.sub(r"<[^>]+>", "", s).strip()
+    return s
+
+async def _post_webhook(payload: dict):
+    if not ALERT_WEBHOOK_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(ALERT_WEBHOOK_URL, json=payload)
+    except Exception:
+        pass
+
 def pg_insert_many(rows):
     if pg_conn is None or not rows:
         return
@@ -561,18 +581,43 @@ async def agents_loop():
                         if finding:
                             pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
 
-                            # also push an alert if score is high
-                            if ALERT_WEBHOOK_URL and finding["score"] >= 2.0:  # tune this
-                                txt = f"🤖 {agent.name.upper()} | {sym} | {finding['label']} | score={finding['score']:.2f}"
-                                try:
-                                    await httpx.AsyncClient(timeout=10).post(ALERT_WEBHOOK_URL, json={"text": txt, "content": txt})
-                                except Exception:
-                                    pass
+                            # also push an alert
+                            if ALERT_WEBHOOK_URL:
+                                if agent.name == "llm_analyst":
+                                    d = finding.get("details") or {}
+                                    conf = float(d.get("confidence") or 0)
+                                    if conf >= LLM_ALERT_MIN_CONF:
+                                        action = (d.get("action") or "neutral").upper()
+                                        rationale = _clean_text(d.get("rationale") or "")[:ALERT_RATIONALE_CHARS]
+                                        tweaks = d.get("tweaks") or []
+                                        tweak_lines = "\n".join(
+                                            [f"• `{t.get('param')}` Δ {t.get('delta')} — {t.get('reason','')}" for t in tweaks[:5]]
+                                        )
+                                        blocks = [
+                                            {"type": "header", "text": {"type": "plain_text", "text": f"🤖 LLM Analyst → {action} ({sym})"}},
+                                            {"type": "section", "fields": [
+                                                {"type": "mrkdwn", "text": f"*Score*: {finding['score']:.2f}"},
+                                                {"type": "mrkdwn", "text": f"*Confidence*: {conf:.2f}"},
+                                            ]},
+                                            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Rationale*\n{rationale or '—'}"}},
+                                        ]
+                                        if tweak_lines:
+                                            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Tweak suggestions*\n{tweak_lines}"}})
+                                        await _post_webhook({
+                                            "text": f"LLM Analyst → {action} {sym} (score {finding['score']:.2f}, conf {conf:.2f})",
+                                            "blocks": blocks
+                                        })
+                                else:
+                                    # compact text for other agents
+                                    txt = f"🤖 {agent.name} | {sym} | {finding['label']} | score={finding['score']:.2f}"
+                                    await _post_webhook({"text": txt})
+
                     except Exception as e:
                         pg_agent_heartbeat(agent.name, "error", note=str(e)[:150])
             await asyncio.sleep(5)
         except Exception:
             await asyncio.sleep(5)
+
 
 @app.post("/agents/run-now")
 async def agents_run_now(symbol: Optional[str] = None):
