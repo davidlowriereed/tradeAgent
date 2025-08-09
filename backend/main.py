@@ -82,7 +82,31 @@ def pg_insert_many(rows):
             )
     except Exception:
         pass
+def pg_insert_finding(agent, symbol, score, label, details):
+    if pg_conn is None:
+        return
+    try:
+        import json as _json
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO findings (agent, symbol, score, label, details) VALUES (%s,%s,%s,%s,%s)",
+                (agent, symbol, score, label, _json.dumps(details or {})),
+            )
+    except Exception:
+        pass
 
+def pg_agent_heartbeat(agent, status="ok", note=None):
+    if pg_conn is None:
+        return
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_runs (agent, status, note) VALUES (%s,%s,%s)",
+                (agent, status, note),
+            )
+    except Exception:
+        pass
+        
 # ---------- In-memory state (per symbol) ----------
 MAX_TICKS = 5000
 RV_SECS = 300  # 5 minutes
