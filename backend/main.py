@@ -574,6 +574,22 @@ async def agents_loop():
         except Exception:
             await asyncio.sleep(5)
 
+@app.post("/agents/run-now")
+async def agents_run_now(symbol: Optional[str] = None):
+    ran = []
+    syms = [symbol] if symbol else SYMBOLS
+    for agent in AGENTS:
+        for sym in syms:
+            try:
+                finding = await agent.run_once(sym)
+                pg_agent_heartbeat(agent.name, "ok", note="manual")
+                if finding:
+                    pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
+                    ran.append({"agent": agent.name, "symbol": sym, "score": finding["score"]})
+            except Exception as e:
+                pg_agent_heartbeat(agent.name, "error", note=f"manual: {e}")
+    return {"ran": ran}
+
 @app.get("/test-alert")
 async def test_alert():
     url = os.getenv("ALERT_WEBHOOK_URL")
