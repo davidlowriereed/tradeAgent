@@ -1,62 +1,61 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Opportunity Radar (Alpha) — {{ symbol }}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-      h1 { margin: 0 0 12px; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-      .k { color: #6b7280; }
-      .v { font-weight: 600; }
-      .small { font-size: 12px; color: #6b7280; }
-      code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
-    </style>
-  </head>
-  <body>
-    <h1>Opportunity Radar (Alpha) — {{ symbol }}</h1>
-    <div class="grid">
-      <div class="card">
-        <div class="k">Cumulative Volume Delta (CVD)</div>
-        <div class="v" id="cvd">—</div>
-      </div>
-      <div class="card">
-        <div class="k">5-min Volume</div>
-        <div class="v" id="vol5m">—</div>
-        <div class="small">RVOL vs recent: <span id="rvol">—</span></div>
-      </div>
-      <div class="card">
-        <div class="k">Best Bid / Ask</div>
-        <div class="v"><span id="bid">—</span> / <span id="ask">—</span></div>
-        <div class="small">Book Imbalance: <span id="imbalance">—</span></div>
-      </div>
-      <div class="card">
-        <div class="k">Trades Cached</div>
-        <div class="v" id="trades">—</div>
-      </div>
-    </div>
-    <p class="small">API: <code>/signals</code> • Health: <code>/health</code></p>
-    <script>
-      async function refresh() {
-        try {
-          const res = await fetch('/signals');
-          const j = await res.json();
-          const fmt = (x) => (x === null || x === undefined) ? '—' : (typeof x === 'number' ? x.toFixed(4) : x);
-          document.getElementById('cvd').textContent = fmt(j.cvd);
-          document.getElementById('vol5m').textContent = fmt(j.volume_5m);
-          document.getElementById('rvol').textContent = j.rvol_vs_recent ? j.rvol_vs_recent.toFixed(2) + '×' : '—';
-          document.getElementById('bid').textContent = fmt(j.best_bid);
-          document.getElementById('ask').textContent = fmt(j.best_ask);
-          document.getElementById('imbalance').textContent = (j.book_imbalance === null || j.book_imbalance === undefined) ? '—' : j.book_imbalance.toFixed(3);
-          document.getElementById('trades').textContent = j.trades_cached;
-        } catch (e) {
-          // ignore
-        }
-      }
-      setInterval(refresh, 1500);
-      refresh();
-    </script>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <title>Opportunity Radar (Alpha)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(220px,1fr)); }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04);}
+    .label { color:#6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;}
+    .value { font-size: 20px; font-weight: 700; margin-top: 6px; }
+    .row { display:flex; gap:12px; align-items:center; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <h1 style="margin:0;">Opportunity Radar (Alpha)</h1>
+    <select id="symbol"></select>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Cumulative Volume Delta (CVD)</div><div id="cvd" class="value">—</div></div>
+    <div class="card"><div class="label">5-min Volume</div><div id="vol" class="value">—</div><div>RVOL vs recent: <span id="rvol">—</span></div></div>
+    <div class="card"><div class="label">Best Bid / Ask</div><div class="value"><span id="bid">—</span> / <span id="ask">—</span></div></div>
+    <div class="card"><div class="label">Trades Cached</div><div id="cached" class="value">—</div></div>
+  </div>
+
+  <div style="margin-top:12px;">
+    API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a>
+  </div>
+
+  <script>
+    async function init() {
+      const h = await fetch('/health').then(r=>r.json());
+      const sel = document.getElementById('symbol');
+      (h.symbols || []).forEach(s => {
+        const o = document.createElement('option');
+        o.value = s; o.textContent = s; sel.appendChild(o);
+      });
+      sel.value = (h.symbols && h.symbols[0]) || 'BTC-USD';
+      poll();
+      sel.addEventListener('change', ()=> poll(true));
+    }
+
+    async function poll(force=false) {
+      const sym = document.getElementById('symbol').value;
+      const res = await fetch(`/signals?symbol=${encodeURIComponent(sym)}`).then(r=>r.json());
+      document.getElementById('cvd').textContent = (res.cvd ?? '—').toFixed ? res.cvd.toFixed(4) : res.cvd;
+      document.getElementById('vol').textContent = (res.volume_5m ?? '—').toFixed ? res.volume_5m.toFixed(4) : res.volume_5m;
+      document.getElementById('rvol').textContent = res.rvol_vs_recent ? `${res.rvol_vs_recent.toFixed(2)}x` : '—';
+      document.getElementById('bid').textContent = res.best_bid ?? '—';
+      document.getElementById('ask').textContent = res.best_ask ?? '—';
+      document.getElementById('cached').textContent = res.trades_cached ?? '—';
+      setTimeout(poll, 1500);
+    }
+
+    init();
+  </script>
+</body>
 </html>
