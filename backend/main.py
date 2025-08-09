@@ -284,7 +284,7 @@ class LLMAnalystAgent(Agent):
 
     ENV:
       LLM_ENABLE=true/false
-      OPENAI_API_KEY=...
+      OPENAI_API_KEY=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
       OPENAI_MODEL=gpt-4o-mini (default)
       OPENAI_BASE_URL= (optional, OpenAI-compatible)
       LLM_MIN_INTERVAL=180
