@@ -270,10 +270,218 @@ class MacroWatcher(Agent):
             pass
         return None
 
+# ---- LLM Analyst Agent -------------------------------------------------------
+from typing import Any, List
+import math
+
+class LLMAnalystAgent(Agent):
+    """
+    Reads recent signals + findings and produces a structured assessment:
+      - action: "observe" | "prepare" | "consider-entry" | "consider-exit"
+      - confidence: 0..1
+      - rationale: short natural-language explanation
+      - tweaks: [{param, delta, reason}]  # suggestions for AOA parameter schema
+
+    ENV:
+      LLM_ENABLE=true/false
+      OPENAI_API_KEY=...
+      OPENAI_MODEL=gpt-4o-mini (default)
+      OPENAI_BASE_URL= (optional, OpenAI-compatible)
+      LLM_MIN_INTERVAL=180
+      LLM_MAX_INPUT_TOKENS=4000
+      LLM_ALERT_MIN_CONF=0.65
+    """
+    def __init__(self, interval_sec=None):
+        # respect ENV toggle
+        enabled = os.getenv("LLM_ENABLE", "false").lower() == "true"
+        poll = int(os.getenv("LLM_MIN_INTERVAL", "180"))
+        super().__init__("llm_analyst", interval_sec or poll)
+        self.enabled = enabled
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.base_url = os.getenv("OPENAI_BASE_URL") or None
+        self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
+        self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
+
+        try:
+            from openai import OpenAI
+            kwargs = {}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = OpenAI(**kwargs)
+        except Exception:
+            self._client = None
+            self.enabled = False
+
+        # tiny memory to avoid repeating identical outputs back-to-back
+        self._last_hash: Dict[str, str] = {}
+
+    async def _gather_context(self, symbol: str) -> dict:
+        # current live signals
+        sig = compute_signals(symbol)
+
+        # last 5 mins of mini-stats
+        now = time.time()
+        window = [r for r in trades[symbol] if r[0] >= now - 300]
+        n_tr = len(window)
+        avg_sz = (sum(w[2] for w in window) / n_tr) if n_tr else 0.0
+        price0 = window[0][1] if n_tr else None
+        price1 = window[-1][1] if n_tr else None
+        price_bps = ((price1 - price0) / price0 * 1e4) if (price0 and price0 > 0) else 0.0
+
+        # latest recent findings from DB for this symbol
+        recent_findings: List[dict] = []
+        if pg_conn is None:
+            await pg_connect()
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ts_utc, agent, score, label, details
+                    FROM findings
+                    WHERE symbol=%s
+                    ORDER BY ts_utc DESC
+                    LIMIT 20
+                """, (symbol,))
+                for ts, a, sc, lb, det in cur.fetchall():
+                    recent_findings.append({
+                        "ts_utc": str(ts),
+                        "agent": a,
+                        "score": float(sc),
+                        "label": lb,
+                        "details": det
+                    })
+        except Exception:
+            pass
+
+        return {
+            "symbol": symbol,
+            "signals": {
+                "cvd": sig.get("cvd"),
+                "volume_5m": sig.get("volume_5m"),
+                "rvol_vs_recent": sig.get("rvol_vs_recent"),
+                "best_bid": sig.get("best_bid"),
+                "best_ask": sig.get("best_ask"),
+                "trades_cached": sig.get("trades_cached"),
+                "price_bps_5m": price_bps,
+                "avg_trade_size_5m": avg_sz,
+                "trades_5m": n_tr,
+            },
+            "recent_findings": recent_findings,
+        }
+
+    def _prompt(self, ctx: dict) -> List[dict]:
+        # system / user messages, JSON-mode friendly
+        sys = (
+            "You are the LLM Analyst Agent for a real-time trading system. "
+            "You DO NOT place trades. You synthesize deterministic agent outputs "
+            "into a concise recommendation. Output VALID JSON per the schema."
+        )
+
+        schema_hint = {
+            "type": "object",
+            "properties": {
+                "action": {"enum": ["observe","prepare","consider-entry","consider-exit"]},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "rationale": {"type": "string"},
+                "tweaks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "param": {"type": "string"},
+                            "delta": {"type": "number"},
+                            "reason": {"type": "string"}
+                        },
+                        "required": ["param","delta","reason"]
+                    }
+                }
+            },
+            "required": ["action","confidence","rationale","tweaks"]
+        }
+
+        user = {
+            "role": "user",
+            "content": (
+                "Context:\n"
+                f"{json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]}\n\n"
+                "Task:\n"
+                "1) Decide action: observe | prepare | consider-entry | consider-exit\n"
+                "2) Provide 1-2 sentence rationale (plain language).\n"
+                "3) Suggest 0-3 parameter tweaks for the Alpha-Optimizer (AOA) across agents. "
+                "   Use short param names, e.g., 'AGENT_RVOL_MIN', 'AGENT_CVD_MIN_BPS', "
+                "   'ALERT_MIN_RVOL'. Use small deltas (e.g., ±0.1, ±2 bps).\n"
+                "Return ONLY JSON: {action, confidence, rationale, tweaks}."
+            )
+        }
+
+        # OpenAI Python SDK uses 'messages=[...]' with dicts like this:
+        return [
+            {"role": "system", "content": sys},
+            user,
+        ], schema_hint
+
+    async def run_once(self, symbol) -> Optional[dict]:
+        if not self.enabled or self._client is None:
+            return None
+
+        ctx = await self._gather_context(symbol)
+        msgs, schema = self._prompt(ctx)
+
+        try:
+            # Use JSON response format for strict output
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._client.chat.completions.create(
+                    model=self.model,
+                    messages=msgs,
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                    max_tokens=600,
+                )
+            )
+            raw = resp.choices[0].message.content or "{}"
+            data = json.loads(raw)
+
+            # basic validation
+            action = data.get("action") or "observe"
+            confidence = float(data.get("confidence") or 0.0)
+            rationale = str(data.get("rationale") or "").strip()
+            tweaks = data.get("tweaks") or []
+
+            finding = {
+                "score": max(0.0, min(10.0, confidence * 10.0)),
+                "label": "llm_analysis",
+                "details": {
+                    "action": action,
+                    "confidence": confidence,
+                    "rationale": rationale[:600],
+                    "tweaks": tweaks[:5],
+                },
+            }
+
+            # optional Slack/Discord ping for higher-confidence calls
+            if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
+                txt = (
+                    f"🧠 LLM Analyst | {symbol} | {action} "
+                    f"(conf {confidence:.2f}) — {rationale[:160]}"
+                )
+                try:
+                    await httpx.AsyncClient(timeout=10).post(
+                        ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
+                    )
+                except Exception:
+                    pass
+
+            return finding
+
+        except Exception:
+            return None
+
+
 AGENTS = [
-    RVOLSpikeAgent(), 
+    RVOLSpikeAgent(),
     CVDDivergenceAgent(),
-    MacroWatcher(),          # harmless if MACRO_FEED_URL isn’t set
+    MacroWatcher(),          # only active if MACRO_FEED_URL is set
+    LLMAnalystAgent(),       # only active if LLM_ENABLE=true and key present
 ]
 
 def pg_insert_many(rows):
