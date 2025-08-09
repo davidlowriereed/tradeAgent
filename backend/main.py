@@ -83,6 +83,105 @@ class Agent:
         """Return a finding dict or None."""
         raise NotImplementedError
 
+class CVDDivergenceAgent(Agent):
+    """
+    Trap Spotter v0 — divergence between price and CVD over a short window.
+    Emits a higher score when both price move (in bps) and CVD delta (abs) are large.
+    Env tweaks:
+      AGENT_CVD_WIN_SEC   (default 120)
+      AGENT_CVD_MIN       (default 25.0)   # min |CVD delta| over window
+      AGENT_CVD_MIN_BPS   (default 10)     # min |price change| in basis points
+    """
+    def __init__(self, window_sec=120, min_abs_cvd=25.0, min_price_bps=10, interval_sec=10):
+        super().__init__("cvd_divergence", interval_sec)
+        self.win = int(os.getenv("AGENT_CVD_WIN_SEC", str(window_sec)))
+        self.min_abs_cvd = float(os.getenv("AGENT_CVD_MIN", str(min_abs_cvd)))
+        self.min_price_bps = float(os.getenv("AGENT_CVD_MIN_BPS", str(min_price_bps)))
+
+    async def run_once(self, symbol):
+        now = time.time()
+        window = [row for row in trades[symbol] if row[0] >= now - self.win]
+        if len(window) < 12:
+            return None
+
+        p0 = window[0][1]
+        p1 = window[-1][1]
+        if p0 <= 0:
+            return None
+
+        price_bps = (p1 - p0) / p0 * 1e4  # basis points
+        cvd_delta = 0.0
+        for _, _, size, side in window:
+            if side == "buy":
+                cvd_delta += size
+            elif side == "sell":
+                cvd_delta -= size
+
+        # Divergence: price ↑ & CVD ↓  OR price ↓ & CVD ↑
+        diverges = (price_bps > self.min_price_bps and cvd_delta < -self.min_abs_cvd) or \
+                   (price_bps < -self.min_price_bps and cvd_delta >  self.min_abs_cvd)
+
+        if not diverges:
+            return None
+
+        # Score scales with both magnitudes (cap at 10 for simplicity)
+        score = min(10.0,
+                    abs(price_bps) / max(1.0, self.min_price_bps) +
+                    abs(cvd_delta) / max(1.0, self.min_abs_cvd))
+
+        return {
+            "score": score,
+            "label": "cvd_divergence",
+            "details": {
+                "window_sec": self.win,
+                "price_bps": price_bps,
+                "cvd_delta": cvd_delta,
+                "p0": p0, "p1": p1
+            }
+        }
+
+class MacroWatcher(Agent):
+    """
+    Macro Watcher v0 — polls a macro/news feed and emits a low-score finding
+    so the system can include it as context. Optional; set MACRO_FEED_URL.
+      MACRO_FEED_URL       (required to enable)
+      MACRO_MIN_INTERVAL   (seconds between polls; default 600)
+    """
+    def __init__(self, interval_sec=None):
+        poll = int(os.getenv("MACRO_MIN_INTERVAL", "600"))
+        super().__init__("macro_watcher", interval_sec or poll)
+        self.url = os.getenv("MACRO_FEED_URL")
+        self._recent = deque(maxlen=200)   # crude de-dupe cache
+
+    async def run_once(self, symbol):
+        if not self.url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(self.url)
+            txt = r.text[:200_000]
+
+            # naive RSS/Atom scrape for <title>...</title>
+            import re, html
+            titles = []
+            for m in re.finditer(r"<title>(.*?)</title>", txt, re.I | re.S):
+                t = re.sub("<.*?>", "", m.group(1)).strip()
+                t = html.unescape(t)
+                if t and t.lower() not in ("rss", "feed") and t not in self._recent:
+                    self._recent.append(t)
+                    titles.append(t)
+            if not titles:
+                return None
+
+            return {
+                "score": 1.0,                 # low weight; contextual
+                "label": "macro_update",
+                "details": {"items": titles[:5]}
+            }
+        except Exception:
+            return None
+
+
 class RVOLSpikeAgent(Agent):
     """Manipulation Hunter v0 — flags high relative volume bursts."""
     def __init__(self, min_rvol=2.5, interval_sec=10):
