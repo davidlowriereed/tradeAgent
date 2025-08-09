@@ -25,7 +25,32 @@
     <div class="card"><div class="label">Best Bid / Ask</div><div class="value"><span id="bid">—</span> / <span id="ask">—</span></div></div>
     <div class="card"><div class="label">Trades Cached</div><div id="cached" class="value">—</div></div>
   </div>
-
+  
+  <div style="margin-top:24px;">
+  <h3>Latest Findings</h3>
+  <div id="findings" class="card" style="max-height:300px; overflow:auto;"></div>
+</div>
+<script>
+  async function loadFindings() {
+    const sym = document.getElementById('symbol').value;
+    const res = await fetch(`/findings?symbol=${encodeURIComponent(sym)}&limit=20`).then(r=>r.json());
+    const box = document.getElementById('findings');
+    box.innerHTML = (res.findings||[]).map(f => {
+      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
+        <b>${f.agent}</b> · <code>${f.label}</code> · score ${f.score.toFixed(2)}
+        <div style="color:#555;">${f.ts_utc}</div>
+      </div>`
+    }).join('') || '—';
+  }
+  // call inside poll()
+  async function poll(force=false){
+    const sym = document.getElementById('symbol').value;
+    const res = await fetch(`/signals?symbol=${encodeURIComponent(sym)}`).then(r=>r.json());
+    // ... existing updates ...
+    setTimeout(poll, 1500);
+    if (!force) loadFindings();
+  }
+</script>
   <div style="margin-top:12px;">
     API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a>
   </div>
