@@ -596,6 +596,39 @@ def _should_post(agent_name: str, sym: str, score: float) -> bool:
     _last_agent_alert_ts[key] = now
     return True
 
+def _fmt_price(x):
+    try: return f"{float(x):,.2f}"
+    except: return str(x)
+
+def _analysis_blocks(sym: str, finding: dict) -> dict:
+    d = finding.get("details") or {}
+    action     = (d.get("action") or "observe").upper()
+    conf       = float(d.get("confidence") or 0.0)
+    rationale  = _clean_text(d.get("rationale") or "")
+    tweaks     = d.get("tweaks") or []
+
+    tweak_lines = "\n".join(
+        [f"• `{t.get('param')}` Δ {t.get('delta')} — {t.get('reason','')}" for t in tweaks[:4]]
+    ) or "—"
+
+    # include a quick snapshot
+    sig = compute_signals(sym)
+    snap = f"RVOL { (sig['rvol_vs_recent'] or 0):.2f}x · CVD {sig['cvd']:.0f} · Bid/Ask {_fmt_price(sig['best_bid'])} / {_fmt_price(sig['best_ask'])}"
+
+    blocks = [
+        {"type":"header","text":{"type":"plain_text","text":f"🧠 LLM Analyst → {action} · {sym}"}},
+        {"type":"context","elements":[{"type":"mrkdwn","text":snap}]},
+        {"type":"section","fields":[
+            {"type":"mrkdwn","text":f"*Score*\n{finding['score']:.2f}"},
+            {"type":"mrkdwn","text":f"*Confidence*\n{conf:.2f}"},
+        ]},
+        {"type":"section","text":{"type":"mrkdwn","text":f"*Rationale*\n{rationale[:400]}"}},
+        {"type":"section","text":{"type":"mrkdwn","text":f"*Tweaks*\n{tweak_lines}"}},
+        {"type":"context","elements":[{"type":"mrkdwn","text":"<https://tradeagent-…ondigitalocean.app|Open dashboard> · auto"}]},
+    ]
+    return {"text": f"LLM: {action} {sym} (conf {conf:.2f})", "blocks": blocks}
+
+
 def _blocks_for_cvd(sym, finding):
     d = finding.get("details") or {}
     return [
@@ -640,67 +673,84 @@ def _blocks_for_llm(sym, finding):
     return blocks
 
 
+SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY", "false").lower() == "true"
+ALERT_VERBOSE       = os.getenv("ALERT_VERBOSE", "true").lower() == "true"
+AGENT_ALERT_COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
+_last_analysis_post: Dict[Tuple[str,str], float] = defaultdict(float)  # (agent,symbol)->ts
+
 async def agents_loop():
     while True:
         try:
             if DB_URL and pg_conn is None:
                 await pg_connect()
 
+            now = time.time()
             for agent in AGENTS:
                 for sym in SYMBOLS:
                     try:
                         finding = await agent.run_once(sym)
                         pg_agent_heartbeat(agent.name, "ok")
-
                         if not finding:
                             continue
 
-                        # persist finding
-                        pg_insert_finding(
-                            agent.name,
-                            sym,
-                            float(finding.get("score", 0.0)),
-                            finding.get("label", ""),
-                            finding.get("details") or {},
-                        )
+                        # persist everything for the UI
+                        pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
 
-                        # optional webhook alert (thresholded + rate-limited)
-                        if ALERT_WEBHOOK_URL and _should_post(agent.name, sym, float(finding.get("score", 0.0))):
-                            if agent.name == "cvd_divergence":
-                                await _post_webhook({
-                                    "text": f"CVD divergence {sym}",
-                                    "blocks": _blocks_for_cvd(sym, finding),
-                                })
+                        # Slack policy
+                        if not ALERT_WEBHOOK_URL:
+                            continue
 
-                            elif agent.name == "rvol_spike":
-                                await _post_webhook({
-                                    "text": f"RVOL spike {sym}",
-                                    "blocks": _blocks_for_rvol(sym, finding),
-                                })
+                        # Only LLM posts (analysis-first) unless verbose enabled
+                        if agent.name == "llm_analyst":
+                            d = finding.get("details") or {}
+                            conf = float(d.get("confidence") or 0)
+                            key  = (agent.name, sym)
+                            if conf >= LLM_ALERT_MIN_CONF and now - _last_analysis_post[key] >= AGENT_ALERT_COOLDOWN_SEC:
+                                payload = _analysis_blocks(sym, finding)
+                                await _post_webhook(payload)
+                                _last_analysis_post[key] = now
 
-                            elif agent.name == "llm_analyst":
-                                d = finding.get("details") or {}
-                                conf = float(d.get("confidence") or 0.0)
-                                if conf >= LLM_ALERT_MIN_CONF:
-                                    await _post_webhook({
-                                        "text": f"LLM analyst {sym}",
-                                        "blocks": _blocks_for_llm(sym, finding),
-                                    })
-
-                            else:
-                                # generic compact message
-                                score_s = f"{float(finding.get('score', 0.0)):.2f}"
-                                txt = f"🤖 {agent.name} | {sym} | {finding.get('label','')} | score={score_s}"
-                                await _post_webhook({"text": txt})
+                        elif not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE:
+                            # optional compact log for raw agents (disabled when analysis-only)
+                            txt = f"🤖 {agent.name} | {sym} | {finding['label']} | score={finding['score']:.2f}"
+                            await _post_webhook({"text": txt})
 
                     except Exception as e:
                         pg_agent_heartbeat(agent.name, "error", note=str(e)[:150])
 
             await asyncio.sleep(5)
-
         except Exception:
-            # back off a little if the outer loop throws
             await asyncio.sleep(5)
+
+async def digest_loop():
+    interval = int(os.getenv("ALERT_SUMMARY_INTERVAL","0") or "0")
+    if interval <= 0 or not ALERT_WEBHOOK_URL:
+        return
+    while True:
+        try:
+            rows = []
+            if pg_conn is None:
+                await pg_connect()
+            with pg_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ts_utc, agent, symbol, score, label
+                    FROM findings
+                    WHERE ts_utc > NOW() - INTERVAL '10 minutes'
+                    ORDER BY score DESC
+                    LIMIT 6
+                """)
+                rows = cur.fetchall()
+
+            if rows:
+                lines = [f"• *{s}* — {a} `{lb}` (score {float(sc):.2f})" for _,a,s,sc,lb in rows]
+                await _post_webhook({"text":"Summary",
+                    "blocks":[
+                        {"type":"header","text":{"type":"plain_text","text":"🧾 10-minute Summary"}},
+                        {"type":"section","text":{"type":"mrkdwn","text":"\n".join(lines)}}
+                    ]})
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
 
 
 
@@ -940,7 +990,9 @@ async def startup_event():
     for sym in SYMBOLS:
         asyncio.create_task(coinbase_ws(sym))
     asyncio.create_task(db_flush_loop())
-    asyncio.create_task(alert_loop())
+    #asyncio.create_task(alert_loop())      # you can disable this if you go analysis-only
     asyncio.create_task(agents_loop())
+    asyncio.create_task(digest_loop())     # optional
+
 
     
