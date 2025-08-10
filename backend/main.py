@@ -785,7 +785,20 @@ async def test_alert():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "symbols": SYMBOLS, "trades_cached": {s: len(trades[s]) for s in SYMBOLS}}
+    agent_status = {}
+    for agent in AGENTS:
+        if hasattr(agent, "enabled") and not agent.enabled:
+            agent_status[agent.name] = {
+                "status": "disabled",
+                "reason": getattr(agent, "disable_reason", "Unknown")
+            }
+        else:
+            # You might also pull from pg_agent_heartbeat if you want last run status
+            agent_status[agent.name] = {"status": "ok"}
+    return {
+        "symbols": SYMBOLS,
+        "agents": agent_status
+    }
 
 @app.get("/db-health")
 async def db_health():
