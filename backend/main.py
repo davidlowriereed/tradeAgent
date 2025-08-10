@@ -567,6 +567,79 @@ app = FastAPI()
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape())
 
+# --- per-agent alert gating ---
+AGENT_ALERT_MIN_SCORE_DEFAULT = float(os.getenv("AGENT_ALERT_MIN_SCORE_DEFAULT", "3.0"))
+AGENT_ALERT_MIN_SCORE_CVD     = float(os.getenv("AGENT_ALERT_MIN_SCORE_CVD", "8.0"))
+AGENT_ALERT_MIN_SCORE_RVOL    = float(os.getenv("AGENT_ALERT_MIN_SCORE_RVOL", "2.5"))
+AGENT_ALERT_COOLDOWN_SEC      = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
+
+_last_agent_alert_ts = {}  # key: (agent, sym) -> ts
+
+def _min_score_for(agent_name: str) -> float:
+    if agent_name == "cvd_divergence":
+        return AGENT_ALERT_MIN_SCORE_CVD
+    if agent_name == "rvol_spike":
+        return AGENT_ALERT_MIN_SCORE_RVOL
+    if agent_name == "llm_analyst":
+        # llm_analyst is gated by confidence separately; still keep a floor
+        return 2.0
+    return AGENT_ALERT_MIN_SCORE_DEFAULT
+
+def _should_post(agent_name: str, sym: str, score: float) -> bool:
+    now = time.time()
+    key = (agent_name, sym)
+    if score < _min_score_for(agent_name):
+        return False
+    last = _last_agent_alert_ts.get(key, 0)
+    if now - last < AGENT_ALERT_COOLDOWN_SEC:
+        return False
+    _last_agent_alert_ts[key] = now
+    return True
+
+def _blocks_for_cvd(sym, finding):
+    d = finding.get("details") or {}
+    return [
+        {"type":"header","text":{"type":"plain_text","text":f"🧊 CVD Divergence • {sym}"}},
+        {"type":"section","fields":[
+            {"type":"mrkdwn","text":f"*Score*: {finding['score']:.2f}"},
+            {"type":"mrkdwn","text":f"*Window*: {d.get('window_sec','—')}s"},
+            {"type":"mrkdwn","text":f"*Price Δ (bps)*: {d.get('price_bps','—'):.2f}"},
+            {"type":"mrkdwn","text":f"*CVD Δ*: {d.get('cvd_delta','—'):.2f}"},
+        ]},
+    ]
+
+def _blocks_for_rvol(sym, finding):
+    d = finding.get("details") or {}
+    return [
+        {"type":"header","text":{"type":"plain_text","text":f"🔥 RVOL Spike • {sym}"}},
+        {"type":"section","fields":[
+            {"type":"mrkdwn","text":f"*Score*: {finding['score']:.2f}"},
+            {"type":"mrkdwn","text":f"*RVOL*: {d.get('rvol','—'):.2f}x"},
+            {"type":"mrkdwn","text":f"*Vol(5m)*: {d.get('volume_5m','—')}"},
+            {"type":"mrkdwn","text":f"*Bid/Ask*: {d.get('best_bid','—')} / {d.get('best_ask','—')}"},
+        ]},
+    ]
+
+def _blocks_for_llm(sym, finding):
+    d = finding.get("details") or {}
+    action = (d.get("action") or "observe").upper()
+    conf   = float(d.get("confidence") or 0.0)
+    rationale = _clean_text(d.get("rationale") or "")[:ALERT_RATIONALE_CHARS]
+    tweaks = d.get("tweaks") or []
+    tweak_lines = "\n".join([f"• `{t.get('param')}` Δ {t.get('delta')} — {t.get('reason','')}" for t in tweaks[:5]])
+    blocks = [
+        {"type":"header","text":{"type":"plain_text","text":f"🧠 LLM Analyst → {action} • {sym}"}},
+        {"type":"section","fields":[
+            {"type":"mrkdwn","text":f"*Score*: {finding['score']:.2f}"},
+            {"type":"mrkdwn","text":f"*Confidence*: {conf:.2f}"},
+        ]},
+        {"type":"section","text":{"type":"mrkdwn","text":f"*Rationale*\n{rationale or '—'}"}},
+    ]
+    if tweak_lines:
+        blocks.append({"type":"section","text":{"type":"mrkdwn","text":f"*Tweak suggestions*\n{tweak_lines}"}})
+    return blocks
+
+
 async def agents_loop():
     while True:
         try:
@@ -578,45 +651,57 @@ async def agents_loop():
                     try:
                         finding = await agent.run_once(sym)
                         pg_agent_heartbeat(agent.name, "ok")
-                        if finding:
-                            pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
 
-                            # also push an alert
-                            if ALERT_WEBHOOK_URL:
-                                if agent.name == "llm_analyst":
-                                    d = finding.get("details") or {}
-                                    conf = float(d.get("confidence") or 0)
-                                    if conf >= LLM_ALERT_MIN_CONF:
-                                        action = (d.get("action") or "neutral").upper()
-                                        rationale = _clean_text(d.get("rationale") or "")[:ALERT_RATIONALE_CHARS]
-                                        tweaks = d.get("tweaks") or []
-                                        tweak_lines = "\n".join(
-                                            [f"• `{t.get('param')}` Δ {t.get('delta')} — {t.get('reason','')}" for t in tweaks[:5]]
-                                        )
-                                        blocks = [
-                                            {"type": "header", "text": {"type": "plain_text", "text": f"🤖 LLM Analyst → {action} ({sym})"}},
-                                            {"type": "section", "fields": [
-                                                {"type": "mrkdwn", "text": f"*Score*: {finding['score']:.2f}"},
-                                                {"type": "mrkdwn", "text": f"*Confidence*: {conf:.2f}"},
-                                            ]},
-                                            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Rationale*\n{rationale or '—'}"}},
-                                        ]
-                                        if tweak_lines:
-                                            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Tweak suggestions*\n{tweak_lines}"}})
-                                        await _post_webhook({
-                                            "text": f"LLM Analyst → {action} {sym} (score {finding['score']:.2f}, conf {conf:.2f})",
-                                            "blocks": blocks
-                                        })
-                                else:
-                                    # compact text for other agents
-                                    txt = f"🤖 {agent.name} | {sym} | {finding['label']} | score={finding['score']:.2f}"
-                                    await _post_webhook({"text": txt})
+                        if not finding:
+                            continue
+
+                        # persist finding
+                        pg_insert_finding(
+                            agent.name,
+                            sym,
+                            float(finding.get("score", 0.0)),
+                            finding.get("label", ""),
+                            finding.get("details") or {},
+                        )
+
+                        # optional webhook alert (thresholded + rate-limited)
+                        if ALERT_WEBHOOK_URL and _should_post(agent.name, sym, float(finding.get("score", 0.0))):
+                            if agent.name == "cvd_divergence":
+                                await _post_webhook({
+                                    "text": f"CVD divergence {sym}",
+                                    "blocks": _blocks_for_cvd(sym, finding),
+                                })
+
+                            elif agent.name == "rvol_spike":
+                                await _post_webhook({
+                                    "text": f"RVOL spike {sym}",
+                                    "blocks": _blocks_for_rvol(sym, finding),
+                                })
+
+                            elif agent.name == "llm_analyst":
+                                d = finding.get("details") or {}
+                                conf = float(d.get("confidence") or 0.0)
+                                if conf >= LLM_ALERT_MIN_CONF:
+                                    await _post_webhook({
+                                        "text": f"LLM analyst {sym}",
+                                        "blocks": _blocks_for_llm(sym, finding),
+                                    })
+
+                            else:
+                                # generic compact message
+                                score_s = f"{float(finding.get('score', 0.0)):.2f}"
+                                txt = f"🤖 {agent.name} | {sym} | {finding.get('label','')} | score={score_s}"
+                                await _post_webhook({"text": txt})
 
                     except Exception as e:
                         pg_agent_heartbeat(agent.name, "error", note=str(e)[:150])
+
             await asyncio.sleep(5)
+
         except Exception:
+            # back off a little if the outer loop throws
             await asyncio.sleep(5)
+
 
 
 @app.post("/agents/run-now")
