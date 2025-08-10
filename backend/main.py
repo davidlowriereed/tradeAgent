@@ -293,27 +293,45 @@ class LLMAnalystAgent(Agent):
       LLM_ALERT_MIN_CONF=0.65
     """
     def __init__(self, interval_sec=None):
-        # respect ENV toggle
         enabled = os.getenv("LLM_ENABLE", "false").lower() == "true"
         poll = int(os.getenv("LLM_MIN_INTERVAL", "180"))
         super().__init__("llm_analyst", interval_sec or poll)
+
         self.enabled = enabled
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.base_url = os.getenv("OPENAI_BASE_URL") or None
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
         self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
 
+        # NEW: keep a reason if we have to disable
+        self.disable_reason = None
+
+        # Pull API key from env
+        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
         try:
             from openai import OpenAI
-            kwargs = {}
-            if self.base_url:
-                kwargs["base_url"] = self.base_url
-            self._client = OpenAI(**kwargs)
-        except Exception:
-            self._client = None
+            if not OPENAI_API_KEY:
+                self.enabled = False
+                self.disable_reason = "OPENAI_API_KEY env var is missing"
+                self._client = None
+            else:
+                # Prepare kwargs (support custom base_url)
+                kwargs = {"api_key": OPENAI_API_KEY}
+                if self.base_url:
+                    kwargs["base_url"] = self.base_url
+                self._client = OpenAI(**kwargs)
+        except ImportError:
+            # SDK not installed
             self.enabled = False
+            self.disable_reason = "OpenAI SDK not installed (add `openai` to requirements.txt)"
+            self._client = None
+        except Exception as e:
+            # Any other init error
+            self.enabled = False
+            self.disable_reason = f"Init error: {e}"
+            self._client = None
 
-        # tiny memory to avoid repeating identical outputs back-to-back
         self._last_hash: Dict[str, str] = {}
 
     async def _gather_context(self, symbol: str) -> dict:
@@ -786,19 +804,43 @@ async def test_alert():
 @app.get("/health")
 async def health():
     agent_status = {}
+
+    # Try to pull last heartbeat times (optional; ignore if DB missing)
+    last_runs = {}
+    try:
+        if DB_URL and pg_conn is None:
+            await pg_connect()
+        if pg_conn:
+            with pg_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT agent, max(ts_utc) AS last_run
+                    FROM agent_runs
+                    GROUP BY agent
+                """)
+                for a, t in cur.fetchall():
+                    last_runs[a] = str(t)
+    except Exception:
+        pass
+
     for agent in AGENTS:
-        if hasattr(agent, "enabled") and not agent.enabled:
-            agent_status[agent.name] = {
-                "status": "disabled",
-                "reason": getattr(agent, "disable_reason", "Unknown")
-            }
-        else:
-            # You might also pull from pg_agent_heartbeat if you want last run status
-            agent_status[agent.name] = {"status": "ok"}
+        # Default structure
+        info = {"status": "ok"}
+        # If agent has an "enabled" flag, reflect it
+        if hasattr(agent, "enabled") and not getattr(agent, "enabled"):
+            info["status"] = "disabled"
+            info["reason"] = getattr(agent, "disable_reason", "unknown")
+        # Add last run if we have it
+        if agent.name in last_runs:
+            info["last_run"] = last_runs[agent.name]
+        agent_status[agent.name] = info
+
     return {
+        "status": "ok",
         "symbols": SYMBOLS,
+        "trades_cached": {s: len(trades[s]) for s in SYMBOLS},
         "agents": agent_status
     }
+
 
 @app.get("/db-health")
 async def db_health():
