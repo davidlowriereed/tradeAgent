@@ -677,6 +677,7 @@ SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY", "false").lower() == "true
 ALERT_VERBOSE       = os.getenv("ALERT_VERBOSE", "true").lower() == "true"
 AGENT_ALERT_COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
 _last_analysis_post: Dict[Tuple[str,str], float] = defaultdict(float)  # (agent,symbol)->ts
+SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY","false").lower() == "true"
 
 async def agents_loop():
     while True:
@@ -990,9 +991,10 @@ async def startup_event():
     for sym in SYMBOLS:
         asyncio.create_task(coinbase_ws(sym))
     asyncio.create_task(db_flush_loop())
-    #asyncio.create_task(alert_loop())      # you can disable this if you go analysis-only
+     # asyncio.create_task(alert_loop())  # <- comment out OR gate it:
+    if not SLACK_ANALYSIS_ONLY:
+        asyncio.create_task(alert_loop())
     asyncio.create_task(agents_loop())
-    asyncio.create_task(digest_loop())     # optional
 
 
     
