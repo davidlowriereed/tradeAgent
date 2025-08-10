@@ -446,15 +446,15 @@ class LLMAnalystAgent(Agent):
             user,
         ], schema_hint
 
-    async def run_once(self, symbol) -> Optional[dict]:
+       async def run_once(self, symbol) -> Optional[dict]:
         if not self.enabled or self._client is None:
             return None
 
         ctx = await self._gather_context(symbol)
         msgs, schema = self._prompt(ctx)
 
+        raw = None
         try:
-            # Use JSON response format for strict output
             resp = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self._client.chat.completions.create(
@@ -468,8 +468,7 @@ class LLMAnalystAgent(Agent):
             raw = resp.choices[0].message.content or "{}"
             data = json.loads(raw)
 
-            # basic validation
-            action = data.get("action") or "observe"
+            action = (data.get("action") or "observe").strip()
             confidence = float(data.get("confidence") or 0.0)
             rationale = str(data.get("rationale") or "").strip()
             tweaks = data.get("tweaks") or []
@@ -484,6 +483,37 @@ class LLMAnalystAgent(Agent):
                     "tweaks": tweaks[:5],
                 },
             }
+
+            # Slack only if high enough confidence
+            if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
+                txt = (
+                    f"🧠 LLM Analyst | {symbol} | {action} "
+                    f"(conf {confidence:.2f}) — {rationale[:160]}"
+                )
+                try:
+                    await httpx.AsyncClient(timeout=10).post(
+                        ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
+                    )
+                except Exception:
+                    pass
+
+            # stash last good output for inspection
+            self._last_hash[symbol] = raw[:800]
+            return finding
+
+        except Exception as e:
+            # record the error as a low-score finding so it shows in UI
+            err = f"{type(e).__name__}: {str(e)[:180]}"
+            det = {"error": err}
+            if raw:
+                det["raw"] = raw[:400]
+            # return a visible error finding (score 0)
+            return {
+                "score": 0.0,
+                "label": "llm_error",
+                "details": det,
+            }
+
 
             # optional Slack/Discord ping for higher-confidence calls
             if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
@@ -781,21 +811,39 @@ async def digest_loop():
 
 
 
-@app.post("/agents/run-now")
-async def agents_run_now(symbol: Optional[str] = None):
-    ran = []
-    syms = [symbol] if symbol else SYMBOLS
-    for agent in AGENTS:
-        for sym in syms:
-            try:
-                finding = await agent.run_once(sym)
-                pg_agent_heartbeat(agent.name, "ok", note="manual")
-                if finding:
-                    pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
-                    ran.append({"agent": agent.name, "symbol": sym, "score": finding["score"]})
-            except Exception as e:
-                pg_agent_heartbeat(agent.name, "error", note=f"manual: {e}")
-    return {"ran": ran}
+@app.post("/agents/llm-selftest")
+async def llm_selftest(symbol: str = Query("BTC-USD")):
+    # find the LLM agent
+    llm = next((a for a in AGENTS if getattr(a, "name", "") == "llm_analyst"), None)
+    if not llm or not llm.enabled or llm._client is None:
+        return {"ok": False, "reason": "llm_analyst not enabled/ready"}
+
+    # minimal context
+    ctx = {
+        "symbol": symbol,
+        "signals": {"cvd": 1.23, "volume_5m": 2.34, "rvol_vs_recent": 1.1,
+                    "best_bid": 100.0, "best_ask": 100.1, "trades_cached": 42,
+                    "price_bps_5m": 5.0, "avg_trade_size_5m": 0.01, "trades_5m": 20},
+        "recent_findings": []
+    }
+    msgs, _ = llm._prompt(ctx)
+
+    try:
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: llm._client.chat.completions.create(
+                model=llm.model,
+                messages=msgs,
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=200,
+            )
+        )
+        raw = resp.choices[0].message.content
+        return {"ok": True, "raw": raw}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
 
 @app.get("/test-alert")
 async def test_alert():
