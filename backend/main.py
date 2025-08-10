@@ -396,13 +396,11 @@ class LLMAnalystAgent(Agent):
         }
 
     def _prompt(self, ctx: dict) -> List[dict]:
-        # system / user messages, JSON-mode friendly
         sys = (
             "You are the LLM Analyst Agent for a real-time trading system. "
             "You DO NOT place trades. You synthesize deterministic agent outputs "
             "into a concise recommendation. Output VALID JSON per the schema."
         )
-
         schema_hint = {
             "type": "object",
             "properties": {
@@ -424,7 +422,6 @@ class LLMAnalystAgent(Agent):
             },
             "required": ["action","confidence","rationale","tweaks"]
         }
-
         user = {
             "role": "user",
             "content": (
@@ -439,19 +436,17 @@ class LLMAnalystAgent(Agent):
                 "Return ONLY JSON: {action, confidence, rationale, tweaks}."
             )
         }
-
-        # OpenAI Python SDK uses 'messages=[...]' with dicts like this:
         return [
             {"role": "system", "content": sys},
             user,
         ], schema_hint
 
-       async def run_once(self, symbol) -> Optional[dict]:
+    async def run_once(self, symbol) -> Optional[dict]:
         if not self.enabled or self._client is None:
             return None
 
         ctx = await self._gather_context(symbol)
-        msgs, schema = self._prompt(ctx)
+        msgs, _schema = self._prompt(ctx)
 
         raw = None
         try:
@@ -484,7 +479,7 @@ class LLMAnalystAgent(Agent):
                 },
             }
 
-            # Slack only if high enough confidence
+            # Optional Slack/Discord ping for higher-confidence calls
             if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
                 txt = (
                     f"🧠 LLM Analyst | {symbol} | {action} "
@@ -497,22 +492,20 @@ class LLMAnalystAgent(Agent):
                 except Exception:
                     pass
 
-            # stash last good output for inspection
             self._last_hash[symbol] = raw[:800]
             return finding
 
         except Exception as e:
-            # record the error as a low-score finding so it shows in UI
             err = f"{type(e).__name__}: {str(e)[:180]}"
             det = {"error": err}
             if raw:
                 det["raw"] = raw[:400]
-            # return a visible error finding (score 0)
             return {
                 "score": 0.0,
                 "label": "llm_error",
                 "details": det,
             }
+
 
 
             # optional Slack/Discord ping for higher-confidence calls
