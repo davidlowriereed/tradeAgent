@@ -35,7 +35,7 @@
     <div id="findings" class="card" style="max-height:300px; overflow:auto;"></div>
   </div>
 
-  <!-- NEW: Agent Health -->
+  <!-- Agent Health -->
   <div style="margin-top:24px;">
     <h3>Agent Health</h3>
     <div id="agents" class="grid"></div>
@@ -54,7 +54,6 @@
     const fmt = (n, opts) => (Number.isFinite(+n) ? nf(opts).format(+n) : '—');
     const fmt2 = n => fmt(n, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const fmt4 = n => fmt(n, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-    const pad = n => String(n).padStart(2,'0');
 
     function timeAgo(iso) {
       const t = new Date(iso).getTime();
@@ -139,6 +138,7 @@
         o.value = s; o.textContent = s; sel.appendChild(o);
       });
       sel.value = (h.symbols && h.symbols[0]) || 'BTC-USD';
+
       loadFindings();
       loadAgents();
       poll();
