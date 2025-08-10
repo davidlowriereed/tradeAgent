@@ -281,16 +281,18 @@ class LLMAnalystAgent(Agent):
       - action: "observe" | "prepare" | "consider-entry" | "consider-exit"
       - confidence: 0..1
       - rationale: short natural-language explanation
-      - tweaks: [{param, delta, reason}]  # suggestions for AOA parameter schema
+      - tweaks: [{param, delta, reason}]
 
     ENV:
       LLM_ENABLE=true/false
-      OPENAI_API_KEY=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
+      OPENAI_API_KEY=...
       OPENAI_MODEL=gpt-4o-mini (default)
       OPENAI_BASE_URL= (optional, OpenAI-compatible)
       LLM_MIN_INTERVAL=180
       LLM_MAX_INPUT_TOKENS=4000
       LLM_ALERT_MIN_CONF=0.65
+      # Optional proxy support:
+      HTTP_PROXY / HTTPS_PROXY
     """
     def __init__(self, interval_sec=None):
         enabled = os.getenv("LLM_ENABLE", "false").lower() == "true"
@@ -303,36 +305,42 @@ class LLMAnalystAgent(Agent):
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
         self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
 
-        # NEW: keep a reason if we have to disable
+        # Track why we might be disabled (shown in /health)
         self.disable_reason = None
+        self._client = None
 
-        # Pull API key from env
-        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-        try:
-            from openai import OpenAI
-            if not OPENAI_API_KEY:
-                self.enabled = False
-                self.disable_reason = "OPENAI_API_KEY env var is missing"
-                self._client = None
-            else:
-                # Prepare kwargs (support custom base_url)
-                kwargs = {"api_key": OPENAI_API_KEY}
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            self.enabled = False
+            self.disable_reason = "OPENAI_API_KEY env var is missing"
+        elif not self.enabled:
+            # LLM explicitly disabled by env
+            self.disable_reason = "LLM_ENABLE=false"
+        else:
+            # Try to construct the OpenAI client (no invalid 'proxies=' kwarg)
+            try:
+                from openai import OpenAI
+                client_kwargs = {"api_key": api_key}
                 if self.base_url:
-                    kwargs["base_url"] = self.base_url
-                self._client = OpenAI(**kwargs)
-        except ImportError:
-            # SDK not installed
-            self.enabled = False
-            self.disable_reason = "OpenAI SDK not installed (add `openai` to requirements.txt)"
-            self._client = None
-        except Exception as e:
-            # Any other init error
-            self.enabled = False
-            self.disable_reason = f"Init error: {e}"
-            self._client = None
+                    client_kwargs["base_url"] = self.base_url
 
+                # Optional proxy via httpx.Client
+                proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+                if proxy_url:
+                    import httpx as _httpx
+                    client_kwargs["http_client"] = _httpx.Client(proxy=proxy_url, timeout=30.0)
+
+                self._client = OpenAI(**client_kwargs)
+            except ImportError:
+                self.enabled = False
+                self.disable_reason = "OpenAI SDK not installed (add `openai` to requirements.txt)"
+            except Exception as e:
+                self.enabled = False
+                self.disable_reason = f"Init error: {e}"
+
+        # tiny memory to reduce duplicate outputs
         self._last_hash: Dict[str, str] = {}
+
 
     async def _gather_context(self, symbol: str) -> dict:
         # current live signals
