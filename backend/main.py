@@ -14,12 +14,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import websockets
 import hashlib, time
+from collections import defaultdict
 
 
 DB_URL = os.getenv("DATABASE_URL", None)
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD")).split(",") if s.strip()]
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
 _last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
+_last_run_ts = defaultdict(float)  # key: (agent.name, symbol) -> last ts
 
 # ---------- Optional Postgres ----------
 pg_conn = None
@@ -253,6 +255,7 @@ class LLMAnalystAgent(Agent):
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
         self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
         self._last_seen: Dict[str, Tuple[str, float]] = {}  # symbol -> (digest, ts)
+        self._last_seen = {}  # symbol -> (digest, ts)
 
         # Track why we might be disabled (shown in /health)
         self.disable_reason = None
@@ -516,6 +519,22 @@ class LLMAnalystAgent(Agent):
                     pass
     
             self._last_hash[symbol] = raw[:800]
+
+            import hashlib, time
+
+            sig_src = json.dumps({
+                "a": action,
+                "c": round(confidence, 2),
+                "r": rationale[:200],
+                "t": [(t.get("param"), float(t.get("delta", 0))) for t in tweaks[:5]],
+            }, sort_keys=True).encode("utf-8")
+            digest = hashlib.sha1(sig_src).hexdigest()
+            last = self._last_seen.get(symbol)
+            now = time.time()
+            if last and last[0] == digest and (now - last[1]) < 90:  # 90s silence window
+                return None  # don’t insert or alert identical analysis
+            self._last_seen[symbol] = (digest, now)
+
             return finding
     
         except Exception as e:
@@ -739,45 +758,33 @@ async def agents_loop():
             now = time.time()
             for agent in AGENTS:
                 for sym in SYMBOLS:
-                    #NEW: honor per-agent interval
                     key = (agent.name, sym)
+                    # honor each agent’s interval_sec (default from its ctor/env)
                     if now - _last_run_ts[key] < max(1, int(getattr(agent, "interval_sec", 10))):
                         continue
-                        
+
                     try:
                         finding = await agent.run_once(sym)
+                        _last_run_ts[key] = time.time()
                         pg_agent_heartbeat(agent.name, "ok")
                         if not finding:
                             continue
 
-                        # persist everything for the UI
-                        pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
-
-                        # Slack policy
-                        if not ALERT_WEBHOOK_URL:
+                        # optional LLM floor (see #3)
+                        if agent.name == "llm_analyst" and finding["score"] < LLM_ANALYST_MIN_SCORE:
                             continue
 
-                        # Only LLM posts (analysis-first) unless verbose enabled
-                        if agent.name == "llm_analyst":
-                            d = finding.get("details") or {}
-                            conf = float(d.get("confidence") or 0)
-                            key  = (agent.name, sym)
-                            if conf >= LLM_ALERT_MIN_CONF and now - _last_analysis_post[key] >= AGENT_ALERT_COOLDOWN_SEC:
-                                payload = _analysis_blocks(sym, finding)
-                                await _post_webhook(payload)
-                                _last_analysis_post[key] = now
+                        pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
 
-                        elif not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE:
-                            # optional compact log for raw agents (disabled when analysis-only)
-                            txt = f"🤖 {agent.name} | {sym} | {finding['label']} | score={finding['score']:.2f}"
-                            await _post_webhook({"text": txt})
-
-                    except Exception as e:
-                        pg_agent_heartbeat(agent.name, "error", note=str(e)[:150])
-
-            await asyncio.sleep(5)
+                        # your existing Slack policy block here…
+                    except Exception:
+                        pg_agent_heartbeat(agent.name, "error")
+                        # (optional) log/print the exception
         except Exception:
-            await asyncio.sleep(5)
+            # (optional) log/print the exception
+            pass
+
+        await asyncio.sleep(5)  # keep your base tick
 
 async def digest_loop():
     interval = int(os.getenv("ALERT_SUMMARY_INTERVAL","0") or "0")
