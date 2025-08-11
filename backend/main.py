@@ -3,7 +3,6 @@ import csv
 import io
 import json
 import os
-import time
 import re
 from collections import defaultdict, deque
 from typing import Dict, Deque, Tuple, Optional
@@ -14,20 +13,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import websockets
 import hashlib, time
-from collections import defaultdict
 
 
 DB_URL = os.getenv("DATABASE_URL", None)
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD")).split(",") if s.strip()]
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
-_last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
-_last_run_ts = defaultdict(float)  # key: (agent.name, symbol) -> last ts
-AGENTS = [
-    RVOLSpikeAgent(),
-    CVDDivergenceAgent(),
-    MacroWatcher(),          # only active if MACRO_FEED_URL is set
-    LLMAnalystAgent(),       # only active if LLM_ENABLE=true and key present
-]
 
 LLM_ALERT_MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
 ALERT_RATIONALE_CHARS = int(os.getenv("ALERT_RATIONALE_CHARS", "280"))
@@ -668,6 +658,12 @@ def _fmt_price(x):
     try: return f"{float(x):,.2f}"
     except: return str(x)
 
+def _fmt_num(x, fmt="{:.2f}"):
+    try:
+        return fmt.format(float(x))
+    except Exception:
+        return "—"
+
 def _analysis_blocks(sym: str, finding: dict) -> dict:
     d = finding.get("details") or {}
     action     = (d.get("action") or "observe").upper()
@@ -1253,7 +1249,14 @@ async def llm_config():
         "LLM_USE_PROXY": os.getenv("LLM_USE_PROXY"),
         "LLM_ENABLE": os.getenv("LLM_ENABLE"),
     }
-
+_last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
+# --- register agents (after class definitions) ---
+AGENTS: list[Agent] = [
+    RVOLSpikeAgent(),
+    CVDDivergenceAgent(),
+    MacroWatcher(),   # only active if MACRO_FEED_URL is set
+    LLMAnalystAgent() # only active if LLM_ENABLE=true and key present
+]
 
 @app.on_event("startup")
 async def startup_event():
