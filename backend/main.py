@@ -1171,6 +1171,42 @@ async def alert_loop():
             pass
         await asyncio.sleep(10)
 
+# simple mirror so we have both paths available
+@app.post("/llm/selftest")
+@app.post("/agents/llm-selftest")
+async def llm_selftest(symbol: str = Query("BTC-USD")):
+    # find the LLM agent
+    llm = next((a for a in AGENTS if getattr(a, "name", "") == "llm_analyst"), None)
+    if not llm or not llm.enabled or llm._client is None:
+        return {"ok": False, "reason": "llm_analyst not enabled/ready"}
+
+    # minimal context (keeps it fast & deterministic)
+    ctx = {
+        "symbol": symbol,
+        "signals": {"cvd": 1.23, "volume_5m": 2.34, "rvol_vs_recent": 1.1,
+                    "best_bid": 100.0, "best_ask": 100.1, "trades_cached": 42,
+                    "price_bps_5m": 5.0, "avg_trade_size_5m": 0.01, "trades_5m": 20},
+        "recent_findings": []
+    }
+    msgs, _ = llm._prompt(ctx)
+
+    try:
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: llm._client.chat.completions.create(
+                model=llm.model,
+                messages=msgs,
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=200,
+            )
+        )
+        raw = resp.choices[0].message.content
+        return {"ok": True, "raw": raw}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @app.on_event("startup")
 async def startup_event():
     os.makedirs(TEMPLATE_DIR, exist_ok=True)
