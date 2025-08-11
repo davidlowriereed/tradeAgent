@@ -275,6 +275,10 @@ class MacroWatcher(Agent):
 from typing import Any, List
 import math
 
+def _agent_map():
+    # Build a fresh name->agent map (handles reloading)
+    return {a.name: a for a in AGENTS}
+
 class LLMAnalystAgent(Agent):
     """
     Reads recent signals + findings and produces a structured assessment:
@@ -300,7 +304,7 @@ class LLMAnalystAgent(Agent):
         super().__init__("llm_analyst", interval_sec or poll)
 
         self.enabled = enabled
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.model = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         self.base_url = os.getenv("OPENAI_BASE_URL") or None
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
         self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
@@ -804,22 +808,63 @@ async def digest_loop():
 
 
 
-@app.post("/agents/llm-selftest")
-async def llm_selftest(symbol: str = Query("BTC-USD")):
-    # find the LLM agent
-    llm = next((a for a in AGENTS if getattr(a, "name", "") == "llm_analyst"), None)
-    if not llm or not llm.enabled or llm._client is None:
+@app.post("/agents/run-now")
+async def run_now(
+    symbol: str = Query("BTC-USD"),
+    names: Optional[str] = Query(None, description="comma-separated agent names; omit or use 'all' for every agent"),
+    insert: bool = Query(True, description="insert findings into DB"),
+    post_slack: bool = Query(False, description="manually post Slack for these runs"),
+):
+    m = _agent_map()
+    wanted: List[str] = []
+    if not names or names.lower() in ("all", "*"):
+        wanted = list(m.keys())
+    else:
+        wanted = [n.strip() for n in names.split(",") if n.strip() in m]
+
+    if not wanted:
+        return {"ok": False, "error": "no agents matched", "available": list(m.keys())}
+
+    results = []
+    for name in wanted:
+        agent = m[name]
+        try:
+            finding = await agent.run_once(symbol)
+            pg_agent_heartbeat(agent.name, "manual")
+
+            if finding and insert:
+                pg_insert_finding(agent.name, symbol, finding["score"], finding["label"], finding.get("details") or {})
+
+            # Optional Slack (off by default to avoid duplicates with background loop)
+            if finding and post_slack and ALERT_WEBHOOK_URL:
+                if agent.name == "llm_analyst":
+                    d = finding.get("details") or {}
+                    conf = float(d.get("confidence") or 0)
+                    if conf >= LLM_ALERT_MIN_CONF:
+                        await _post_webhook(_analysis_blocks(symbol, finding))
+                elif not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE and _should_post(agent.name, symbol, finding["score"]):
+                    await _post_webhook({"text": f"🤖 {agent.name} | {symbol} | {finding['label']} | score={finding['score']:.2f}"})
+
+            results.append({"agent": agent.name, "finding": finding})
+        except Exception as e:
+            results.append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
+
+    return {"ok": True, "ran": wanted, "results": results}
+
+
+@app.post("/agents/test-llm")
+async def test_llm(
+    symbol: str = Query("BTC-USD"),
+    insert: bool = Query(False, description="insert the generated analysis into DB"),
+    post_slack: bool = Query(False, description="post Slack if conf >= threshold"),
+):
+    llm = _agent_map().get("llm_analyst")
+    if not llm or not getattr(llm, "enabled", False) or llm._client is None:
         return {"ok": False, "reason": "llm_analyst not enabled/ready"}
 
-    # minimal context
-    ctx = {
-        "symbol": symbol,
-        "signals": {"cvd": 1.23, "volume_5m": 2.34, "rvol_vs_recent": 1.1,
-                    "best_bid": 100.0, "best_ask": 100.1, "trades_cached": 42,
-                    "price_bps_5m": 5.0, "avg_trade_size_5m": 0.01, "trades_5m": 20},
-        "recent_findings": []
-    }
-    msgs, _ = llm._prompt(ctx)
+    # Gather live context but call OpenAI directly (no internal Slack, no duplicates)
+    ctx = await llm._gather_context(symbol)
+    msgs, _schema = llm._prompt(ctx)
 
     try:
         resp = await asyncio.get_event_loop().run_in_executor(
@@ -828,12 +873,37 @@ async def llm_selftest(symbol: str = Query("BTC-USD")):
                 model=llm.model,
                 messages=msgs,
                 response_format={"type": "json_object"},
-                temperature=0.0,
-                max_tokens=200,
+                temperature=0.2,
+                max_tokens=600,
             )
         )
-        raw = resp.choices[0].message.content
-        return {"ok": True, "raw": raw}
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        action = (data.get("action") or "observe").strip()
+        confidence = float(data.get("confidence") or 0.0)
+        rationale = str(data.get("rationale") or "").strip()
+        tweaks = data.get("tweaks") or []
+
+        finding = {
+            "agent": "llm_analyst",
+            "symbol": symbol,
+            "score": max(0.0, min(10.0, confidence * 10.0)),
+            "label": "llm_analysis",
+            "details": {
+                "action": action,
+                "confidence": confidence,
+                "rationale": rationale[:600],
+                "tweaks": tweaks[:5],
+            },
+        }
+
+        if insert:
+            pg_insert_finding("llm_analyst", symbol, finding["score"], finding["label"], finding["details"])
+
+        if post_slack and ALERT_WEBHOOK_URL and confidence >= LLM_ALERT_MIN_CONF:
+            await _post_webhook(_analysis_blocks(symbol, finding))
+
+        return {"ok": True, "finding": finding}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
