@@ -65,23 +65,30 @@
     }
 
     function renderFinding(f){
-      const base = `<b>${f.agent}</b> · <code>${f.label}</code> · score ${fmt2(f.score)}
-                    <div style="color:#555;">${f.ts_utc}</div>`;
-      if (f.label === 'llm_analysis' && f.details) {
-        const d = f.details || {};
-        const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
-          ? `<ul style="margin:6px 0 0 20px;">
-               ${d.tweaks.map(t=>`<li><code>${t.param}</code>: Δ ${t.delta} — ${t.reason}</li>`).join('')}
-             </ul>` : '';
-        return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
-          ${base}
-          <div>Action: <b>${(d.action||'observe')}</b> (conf ${fmt2(d.confidence)})</div>
-          <div style="color:#333;">${String(d.rationale||'').replace(/</g,'&lt;')}</div>
-          ${tweaks}
-        </div>`;
-      }
-      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">${base}</div>`;
-    }
+  const base = `<b>${f.agent}</b> · <code>${f.label}</code> · score ${fmt2(f.score)}
+                <div style="color:#555;">${f.ts_utc}</div>`;
+  if (f.label === 'llm_analysis' && f.details) {
+    const d = f.details || {};
+    const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
+      ? `<ul style="margin:6px 0 0 20px;">
+           ${d.tweaks.map(t=>`<li><code>${t.param}</code>: Δ ${t.delta} — ${t.reason}</li>`).join('')}
+         </ul>` : '';
+    return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
+      ${base}
+      <div>Action: <b>${(d.action||'observe')}</b> (conf ${fmt2(d.confidence)})</div>
+      <div style="color:#333;">${String(d.rationale||'').replace(/</g,'&lt;')}</div>
+      ${tweaks}
+    </div>`;
+  }
+  if (f.label === 'llm_error' && f.details) {
+    const err = (f.details.error || '').replace(/</g,'&lt;');
+    return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
+      ${base}
+      <div style="color:#b91c1c;">LLM Error: ${err}</div>
+    </div>`;
+  }
+  return `<div style="padding:6px 0; border-bottom:1px solid #eee;">${base}</div>`;
+}
 
     async function loadFindings() {
       const sym = document.getElementById('symbol').value;
