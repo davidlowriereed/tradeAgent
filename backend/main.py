@@ -79,6 +79,7 @@ class Agent:
     def __init__(self, name, interval_sec=10):
         self.name = name
         self.interval_sec = interval_sec
+        self.post_from_agent = os.getenv("LLM_POST_FROM_AGENT", "false").lower() == "true"
 
     async def run_once(self, symbol) -> Optional[dict]:
         """Return a finding dict or None."""
