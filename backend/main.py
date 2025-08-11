@@ -860,45 +860,53 @@ async def digest_loop():
 @app.post("/agents/run-now")
 async def run_now(
     symbol: str = Query("BTC-USD"),
-    names: Optional[str] = Query(None, description="comma-separated agent names; omit or use 'all' for every agent"),
-    insert: bool = Query(True, description="insert findings into DB"),
-    post_slack: bool = Query(False, description="manually post Slack for these runs"),
+    names: Optional[str] = Query(None),
+    agent: Optional[str] = Query(None),
+    insert: bool = Query(True),
+    post_slack: bool = Query(False),
 ):
-    m = _agent_map()
-    wanted: List[str] = []
-    if not names or names.lower() in ("all", "*"):
-        wanted = list(m.keys())
-    else:
-        wanted = [n.strip() for n in names.split(",") if n.strip() in m]
+    # accept either ?names=a,b or ?agent=a
+    chosen = []
+    if names:
+        chosen = [n.strip() for n in names.split(",") if n.strip()]
+    elif agent:
+        chosen = [agent.strip()]
 
+    m = {a.name: a for a in AGENTS}
+    if not chosen:
+        chosen = list(m.keys())
+
+    wanted = [n for n in chosen if n in m]
     if not wanted:
         return {"ok": False, "error": "no agents matched", "available": list(m.keys())}
 
     results = []
-    for name in wanted:
-        agent = m[name]
+    for nm in wanted:
+        ag = m[nm]
         try:
-            finding = await agent.run_once(symbol)
-            pg_agent_heartbeat(agent.name, "manual")
+            # CALL THE RIGHT METHOD HERE:
+            finding = await ag.run_once(symbol)
 
+            # heartbeat + optional insert
+            pg_agent_heartbeat(ag.name, "manual")
             if finding and insert:
-                pg_insert_finding(agent.name, symbol, finding["score"], finding["label"], finding.get("details") or {})
+                pg_insert_finding(ag.name, symbol, finding["score"], finding["label"], finding.get("details") or {})
 
-            # Optional Slack (off by default to avoid duplicates with background loop)
+            # optional Slack when manually testing
             if finding and post_slack and ALERT_WEBHOOK_URL:
-                if agent.name == "llm_analyst":
-                    d = finding.get("details") or {}
-                    conf = float(d.get("confidence") or 0)
+                if ag.name == "llm_analyst":
+                    conf = float((finding.get("details") or {}).get("confidence") or 0)
                     if conf >= LLM_ALERT_MIN_CONF:
                         await _post_webhook(_analysis_blocks(symbol, finding))
-                elif not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE and _should_post(agent.name, symbol, finding["score"]):
-                    await _post_webhook({"text": f"🤖 {agent.name} | {symbol} | {finding['label']} | score={finding['score']:.2f}"})
+                elif not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE:
+                    await _post_webhook({"text": f"🤖 {ag.name} | {symbol} | {finding['label']} | score={finding['score']:.2f}"})
 
-            results.append({"agent": agent.name, "finding": finding})
+            results.append({"agent": ag.name, "finding": finding})
         except Exception as e:
-            results.append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
+            results.append({"agent": ag.name, "error": f"{type(e).__name__}: {e}"})
 
     return {"ok": True, "ran": wanted, "results": results}
+
 
 
 @app.post("/agents/test-llm")
