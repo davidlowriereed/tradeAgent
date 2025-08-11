@@ -1202,6 +1202,46 @@ async def llm_selftest(symbol: str = Query("BTC-USD")):
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+@app.post("/llm/httpx-probe")
+async def llm_httpx_probe(model: str = Query("gpt-4o-mini")):
+    import os, httpx, json
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"ok": False, "error": "no OPENAI_API_KEY"}
+    # Force no env proxies, no HTTP/2 weirdness
+    async with httpx.AsyncClient(timeout=20, http2=False, trust_env=False) as c:
+        try:
+            r = await c.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Say 'pong' as JSON"}],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0,
+                    "max_tokens": 20,
+                },
+            )
+            return {"ok": r.status_code < 400, "status": r.status_code, "body": (r.text or "")[:400]}
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+@app.get("/llm/config")
+async def llm_config():
+    # Peek at what the running process actually sees
+    return {
+        "OPENAI_MODEL": os.getenv("OPENAI_MODEL"),
+        "LLM_MODEL": os.getenv("LLM_MODEL"),
+        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL"),
+        "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
+        "HTTP_PROXY": os.getenv("HTTP_PROXY"),
+        "LLM_USE_PROXY": os.getenv("LLM_USE_PROXY"),
+        "LLM_ENABLE": os.getenv("LLM_ENABLE"),
+    }
+
 
 @app.on_event("startup")
 async def startup_event():
