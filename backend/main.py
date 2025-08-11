@@ -907,6 +907,17 @@ async def test_llm(
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+@app.get("/llm/netcheck")
+async def llm_netcheck():
+    import httpx, os
+    base = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(base + "/models",
+                            headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"})
+        return {"ok": r.status_code < 500, "status": r.status_code, "base": base, "snippet": (r.text or "")[:200]}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "base": base}
 
 @app.get("/test-alert")
 async def test_alert():
