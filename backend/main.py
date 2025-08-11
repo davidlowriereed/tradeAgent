@@ -22,6 +22,54 @@ SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD"
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
 _last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
 _last_run_ts = defaultdict(float)  # key: (agent.name, symbol) -> last ts
+AGENTS = [
+    RVOLSpikeAgent(),
+    CVDDivergenceAgent(),
+    MacroWatcher(),          # only active if MACRO_FEED_URL is set
+    LLMAnalystAgent(),       # only active if LLM_ENABLE=true and key present
+]
+
+LLM_ALERT_MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
+ALERT_RATIONALE_CHARS = int(os.getenv("ALERT_RATIONALE_CHARS", "280"))
+LLM_ANALYST_MIN_SCORE = float(os.getenv("LLM_ANALYST_MIN_SCORE", "2.0"))
+
+# ---------- In-memory state (per symbol) ----------
+MAX_TICKS = 5000
+RV_SECS = 300  # 5 minutes
+
+trades: Dict[str, Deque[Tuple[float,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=MAX_TICKS))
+cvd: Dict[str, float] = defaultdict(float)
+hist_5m: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=48))
+best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
+best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
+db_buffer: Dict[str, Deque[Tuple[str,str,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=20000))
+
+# ---------- Alerts (webhook is optional) ----------
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord webhook
+ALERT_MIN_RVOL = float(os.getenv("ALERT_MIN_RVOL", "2.0"))      # e.g., 2.0x
+ALERT_CVD_DELTA = float(os.getenv("ALERT_CVD_DELTA", "50"))     # abs change in CVD within 5m window
+ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC", "180"))# per symbol
+
+last_alert_ts: Dict[str, float] = defaultdict(lambda: 0.0)
+
+app = FastAPI()
+
+# tiny HTML page
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape())
+
+# --- per-agent alert gating ---
+AGENT_ALERT_MIN_SCORE_DEFAULT = float(os.getenv("AGENT_ALERT_MIN_SCORE_DEFAULT", "3.0"))
+AGENT_ALERT_MIN_SCORE_CVD     = float(os.getenv("AGENT_ALERT_MIN_SCORE_CVD", "8.0"))
+AGENT_ALERT_MIN_SCORE_RVOL    = float(os.getenv("AGENT_ALERT_MIN_SCORE_RVOL", "2.5"))
+AGENT_ALERT_COOLDOWN_SEC      = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
+
+_last_agent_alert_ts = {}  # key: (agent, sym) -> ts
+
+ALERT_VERBOSE       = os.getenv("ALERT_VERBOSE", "true").lower() == "true"
+AGENT_ALERT_COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
+_last_analysis_post: Dict[Tuple[str,str], float] = defaultdict(float)  # (agent,symbol)->ts
+SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY","false").lower() == "true"
 
 # ---------- Optional Postgres ----------
 pg_conn = None
@@ -489,7 +537,9 @@ class LLMAnalystAgent(Agent):
                     "tweaks": tweaks,
                 },
             }
-
+            
+            import hashlib, time
+            
             sig_src = json.dumps({
                 "a": action,
                 "c": round(confidence, 2),
@@ -520,21 +570,6 @@ class LLMAnalystAgent(Agent):
     
             self._last_hash[symbol] = raw[:800]
 
-            import hashlib, time
-
-            sig_src = json.dumps({
-                "a": action,
-                "c": round(confidence, 2),
-                "r": rationale[:200],
-                "t": [(t.get("param"), float(t.get("delta", 0))) for t in tweaks[:5]],
-            }, sort_keys=True).encode("utf-8")
-            digest = hashlib.sha1(sig_src).hexdigest()
-            last = self._last_seen.get(symbol)
-            now = time.time()
-            if last and last[0] == digest and (now - last[1]) < 90:  # 90s silence window
-                return None  # don’t insert or alert identical analysis
-            self._last_seen[symbol] = (digest, now)
-
             return finding
     
         except Exception as e:
@@ -549,15 +584,8 @@ class LLMAnalystAgent(Agent):
             }
 
 
-AGENTS = [
-    RVOLSpikeAgent(),
-    CVDDivergenceAgent(),
-    MacroWatcher(),          # only active if MACRO_FEED_URL is set
-    LLMAnalystAgent(),       # only active if LLM_ENABLE=true and key present
-]
 
-LLM_ALERT_MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
-ALERT_RATIONALE_CHARS = int(os.getenv("ALERT_RATIONALE_CHARS", "280"))
+
 
 def _clean_text(s: str) -> str:
     if not s:
@@ -613,38 +641,7 @@ def pg_agent_heartbeat(agent, status="ok", note=None):
     except Exception:
         pass
         
-# ---------- In-memory state (per symbol) ----------
-MAX_TICKS = 5000
-RV_SECS = 300  # 5 minutes
 
-trades: Dict[str, Deque[Tuple[float,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=MAX_TICKS))
-cvd: Dict[str, float] = defaultdict(float)
-hist_5m: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=48))
-best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
-best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
-db_buffer: Dict[str, Deque[Tuple[str,str,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=20000))
-
-# ---------- Alerts (webhook is optional) ----------
-ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord webhook
-ALERT_MIN_RVOL = float(os.getenv("ALERT_MIN_RVOL", "2.0"))      # e.g., 2.0x
-ALERT_CVD_DELTA = float(os.getenv("ALERT_CVD_DELTA", "50"))     # abs change in CVD within 5m window
-ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC", "180"))# per symbol
-
-last_alert_ts: Dict[str, float] = defaultdict(lambda: 0.0)
-
-app = FastAPI()
-
-# tiny HTML page
-TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
-env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape())
-
-# --- per-agent alert gating ---
-AGENT_ALERT_MIN_SCORE_DEFAULT = float(os.getenv("AGENT_ALERT_MIN_SCORE_DEFAULT", "3.0"))
-AGENT_ALERT_MIN_SCORE_CVD     = float(os.getenv("AGENT_ALERT_MIN_SCORE_CVD", "8.0"))
-AGENT_ALERT_MIN_SCORE_RVOL    = float(os.getenv("AGENT_ALERT_MIN_SCORE_RVOL", "2.5"))
-AGENT_ALERT_COOLDOWN_SEC      = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
-
-_last_agent_alert_ts = {}  # key: (agent, sym) -> ts
 
 def _min_score_for(agent_name: str) -> float:
     if agent_name == "cvd_divergence":
@@ -742,12 +739,6 @@ def _blocks_for_llm(sym, finding):
     if tweak_lines:
         blocks.append({"type":"section","text":{"type":"mrkdwn","text":f"*Tweak suggestions*\n{tweak_lines}"}})
     return blocks
-
-
-ALERT_VERBOSE       = os.getenv("ALERT_VERBOSE", "true").lower() == "true"
-AGENT_ALERT_COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
-_last_analysis_post: Dict[Tuple[str,str], float] = defaultdict(float)  # (agent,symbol)->ts
-SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY","false").lower() == "true"
 
 async def agents_loop():
     while True:
