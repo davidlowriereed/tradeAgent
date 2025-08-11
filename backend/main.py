@@ -330,7 +330,8 @@ class LLMAnalystAgent(Agent):
 
                 # Optional proxy via httpx.Client
                 proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-                if proxy_url:
+                use_proxy = (os.getenv("LLM_IGNORE_PROXY", "false").lower() != "true")
+                if proxy_url and use_proxy:
                     import httpx as _httpx
                     client_kwargs["http_client"] = _httpx.Client(proxy=proxy_url, timeout=30.0)
 
