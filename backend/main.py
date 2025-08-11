@@ -384,8 +384,10 @@ class LLMAnalystAgent(Agent):
                     SELECT ts_utc, agent, score, label, details
                     FROM findings
                     WHERE symbol=%s
+                        AND label <> 'llm_error'
+                        AND ts_utc > NOW() - INTERVAL '30 minutes'
                     ORDER BY ts_utc DESC
-                    LIMIT 20
+                    LIMIT 50
                 """, (symbol,))
                 for ts, a, sc, lb, det in cur.fetchall():
                     recent_findings.append({
@@ -414,119 +416,166 @@ class LLMAnalystAgent(Agent):
             "recent_findings": recent_findings,
         }
 
-    def _prompt(self, ctx: dict) -> List[dict]:
-        sys = (
-            "You are the LLM Analyst Agent for a real-time trading system. "
-            "You DO NOT place trades. You synthesize deterministic agent outputs "
-            "into a concise recommendation. Output VALID JSON per the schema."
-        )
-        schema_hint = {
-            "type": "object",
-            "properties": {
-                "action": {"enum": ["observe","prepare","consider-entry","consider-exit"]},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                "rationale": {"type": "string"},
-                "tweaks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "param": {"type": "string"},
-                            "delta": {"type": "number"},
-                            "reason": {"type": "string"}
+def _prompt(self, ctx: dict) -> List[dict]:
+    sys = (
+        "You are the LLM Analyst Agent for a real-time trading system.\n"
+        "- You DO NOT place trades.\n"
+        "- Base your decision on the current `signals` and any recent NON-error findings only.\n"
+        "- Ignore connectivity/tooling errors (e.g., items labeled `llm_error`) and do NOT mention them.\n"
+        "- If live data is sparse (e.g., volume_5m == 0 and trades_5m == 0), choose 'observe' with low confidence.\n"
+        "Output VALID JSON only."
+    )
+    schema_hint = {
+        "type": "object",
+        "properties": {
+            "action": {"enum": ["observe","prepare","consider-entry","consider-exit"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "rationale": {"type": "string"},
+            "tweaks": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "param": {"type": "string"},
+                                "delta": {"type": "number"},
+                                "reason": {"type": "string"}
+                            },
+                            "required": ["param","delta","reason"]
                         },
-                        "required": ["param","delta","reason"]
-                    }
+                        {"type": "string"}  # also accept compact "PARAM:+0.1" forms
+                    ]
                 }
-            },
-            "required": ["action","confidence","rationale","tweaks"]
-        }
-        user = {
-            "role": "user",
-            "content": (
-                "Context:\n"
-                f"{json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]}\n\n"
-                "Task:\n"
-                "1) Decide action: observe | prepare | consider-entry | consider-exit\n"
-                "2) Provide 1-2 sentence rationale (plain language).\n"
-                "3) Suggest 0-3 parameter tweaks for the Alpha-Optimizer (AOA) across agents. "
-                "   Use short param names, e.g., 'AGENT_RVOL_MIN', 'AGENT_CVD_MIN_BPS', "
-                "   'ALERT_MIN_RVOL'. Use small deltas (e.g., ±0.1, ±2 bps).\n"
-                "Return ONLY JSON: {action, confidence, rationale, tweaks}."
-            )
-        }
-        return [
-            {"role": "system", "content": sys},
-            user,
-        ], schema_hint
-
-    async def run_once(self, symbol) -> Optional[dict]:
-        if not self.enabled or self._client is None:
-            return None
-
-        ctx = await self._gather_context(symbol)
-        msgs, _schema = self._prompt(ctx)
-
-        raw = None
-        try:
-            # Use a thread to avoid blocking the event loop
-            resp = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._client.chat.completions.create(
-                    model=self.model,
-                    messages=msgs,
-                    response_format={"type": "json_object"},
-                    temperature=0.2,
-                    max_tokens=600,
-                )
-            )
-            raw = resp.choices[0].message.content or "{}"
-            data = json.loads(raw)
-
-            action = (data.get("action") or "observe").strip()
-            confidence = float(data.get("confidence") or 0.0)
-            rationale = str(data.get("rationale") or "").strip()
-            tweaks = data.get("tweaks") or []
-
-            finding = {
-                "score": max(0.0, min(10.0, confidence * 10.0)),
-                "label": "llm_analysis",
-                "details": {
-                    "action": action,
-                    "confidence": confidence,
-                    "rationale": rationale[:600],
-                    "tweaks": tweaks[:5],
-                },
             }
+        },
+        "required": ["action","confidence","rationale","tweaks"]
+    }
+    user = {
+        "role": "user",
+        "content": (
+            "Context:\n"
+            f"{json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]}\n\n"
+            "Task:\n"
+            "1) Decide action: observe | prepare | consider-entry | consider-exit.\n"
+            "2) Provide a 1-2 sentence rationale in plain language. Do NOT mention tooling or connectivity.\n"
+            "3) Suggest 0-3 parameter tweaks for the Alpha-Optimizer (AOA). Either give\n"
+            "   objects {param, delta, reason} or compact strings like 'ALERT_MIN_RVOL:+0.1'.\n"
+            "Return ONLY JSON: {action, confidence, rationale, tweaks}."
+        )
+    }
+    return [
+        {"role": "system", "content": sys},
+        user,
+    ], schema_hint
 
-            # Optional Slack/Discord ping for higher-confidence calls
-            if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
-                txt = (
-                    f"🧠 LLM Analyst | {symbol} | {action} "
-                    f"(conf {confidence:.2f}) — {rationale[:160]}"
-                )
+async def run_once(self, symbol) -> Optional[dict]:
+    if not self.enabled or self._client is None:
+        return None
+
+    import re, httpx  # local imports are fine; avoids top-level churn
+
+    # 1) Build context and defensively drop error findings from it
+    ctx = await self._gather_context(symbol)
+    if isinstance(ctx.get("recent_findings"), list):
+        ctx["recent_findings"] = [
+            f for f in ctx["recent_findings"] if str(f.get("label")) != "llm_error"
+        ]
+
+    msgs, _schema = self._prompt(ctx)
+
+    # Helper: accept either dict tweaks or "PARAM:+0.1" strings and normalize
+    def _normalize_tweaks(t):
+        out = []
+        if not isinstance(t, list):
+            return out
+        for item in t:
+            if isinstance(item, dict):
+                param = str(item.get("param") or "").strip()
+                reason = str(item.get("reason") or "").strip() or "model-suggested"
                 try:
-                    await httpx.AsyncClient(timeout=10).post(
-                        ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
-                    )
+                    delta = float(item.get("delta"))
                 except Exception:
-                    pass
+                    continue
+                if param:
+                    out.append({"param": param, "delta": delta, "reason": reason})
+            elif isinstance(item, str):
+                m = re.match(r"\s*([A-Za-z0-9_.:-]+)\s*:\s*([+\-]?\d+(?:\.\d+)?)", item)
+                if m:
+                    out.append({
+                        "param": m.group(1),
+                        "delta": float(m.group(2)),
+                        "reason": "compact format"
+                    })
+        return out[:5]
 
-            self._last_hash[symbol] = raw[:800]
-            return finding
+    raw = None
+    try:
+        # 2) Call OpenAI in a thread to avoid blocking the loop
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._client.chat.completions.create(
+                model=self.model,
+                messages=msgs,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=600,
+            )
+        )
+        raw = resp.choices[0].message.content or "{}"
 
-        except Exception as e:
-            err = f"{type(e).__name__}: {str(e)[:180]}"
-            det = {"error": err}
-            if raw:
-                det["raw"] = raw[:400]
-            return {
-                "score": 0.0,
-                "label": "llm_error",
-                "details": det,
-            }
+        # 3) Parse + sanitize
+        data = json.loads(raw)
 
+        action = (data.get("action") or "observe").strip()
+        try:
+            confidence = float(data.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        rationale = str(data.get("rationale") or "").strip()
+        tweaks = _normalize_tweaks(data.get("tweaks") or [])
 
+        # Clamp confidence + compute score
+        confidence = max(0.0, min(1.0, confidence))
+        score = max(0.0, min(10.0, confidence * 10.0))
+
+        finding = {
+            "score": score,
+            "label": "llm_analysis",
+            "details": {
+                "action": action,
+                "confidence": confidence,
+                "rationale": rationale[:600],
+                "tweaks": tweaks,
+            },
+        }
+
+        # 4) Optional Slack ping (analysis-only mode still handled elsewhere)
+        if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
+            txt = (
+                f"🧠 LLM Analyst | {symbol} | {action} "
+                f"(conf {confidence:.2f}) — {rationale[:160]}"
+            )
+            try:
+                await httpx.AsyncClient(timeout=10).post(
+                    ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
+                )
+            except Exception:
+                pass
+
+        self._last_hash[symbol] = raw[:800]
+        return finding
+
+    except Exception as e:
+        err = f"{type(e).__name__}: {str(e)[:180]}"
+        det = {"error": err}
+        if raw:
+            det["raw"] = raw[:400]
+        return {
+            "score": 0.0,
+            "label": "llm_error",
+            "details": det,
+        }
 
 AGENTS = [
     RVOLSpikeAgent(),
