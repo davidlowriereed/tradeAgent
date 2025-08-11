@@ -308,7 +308,7 @@ class LLMAnalystAgent(Agent):
         enabled = os.getenv("LLM_ENABLE", "false").lower() == "true"
         poll = int(os.getenv("LLM_MIN_INTERVAL", "180"))
         super().__init__("llm_analyst", interval_sec or poll)
-
+        self.post_from_agent = os.getenv("LLM_POST_FROM_AGENT", "false").lower() == "true"
         self.enabled = enabled
         # Model selection with fallback; prevents invalid values like "gpt-5" from breaking silently
         self.model = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4o-mini"
@@ -473,7 +473,7 @@ async def run_once(self, symbol) -> Optional[dict]:
     if not self.enabled or self._client is None:
         return None
 
-    import re, httpx  # local imports are fine; avoids top-level churn
+    import re, httpx
 
     # 1) Build context and defensively drop error findings from it
     ctx = await self._gather_context(symbol)
@@ -526,7 +526,6 @@ async def run_once(self, symbol) -> Optional[dict]:
 
         # 3) Parse + sanitize
         data = json.loads(raw)
-
         action = (data.get("action") or "observe").strip()
         try:
             confidence = float(data.get("confidence") or 0.0)
@@ -550,8 +549,10 @@ async def run_once(self, symbol) -> Optional[dict]:
             },
         }
 
-        # 4) Optional Slack ping (analysis-only mode still handled elsewhere)
-        if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
+        # 4) Optional Slack ping from the agent itself (usually keep off;
+        #     let the global poster handle cooldown/dedupe). Requires:
+        #     self.post_from_agent = env LLM_POST_FROM_AGENT=="true"
+        if getattr(self, "post_from_agent", False) and ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
             txt = (
                 f"🧠 LLM Analyst | {symbol} | {action} "
                 f"(conf {confidence:.2f}) — {rationale[:160]}"
@@ -576,6 +577,7 @@ async def run_once(self, symbol) -> Optional[dict]:
             "label": "llm_error",
             "details": det,
         }
+
 
 AGENTS = [
     RVOLSpikeAgent(),
