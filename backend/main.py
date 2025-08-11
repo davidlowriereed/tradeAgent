@@ -13,11 +13,13 @@ from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import websockets
+import hashlib, time
+
 
 DB_URL = os.getenv("DATABASE_URL", None)
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD")).split(",") if s.strip()]
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
-
+_last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
 
 # ---------- Optional Postgres ----------
 pg_conn = None
@@ -250,6 +252,7 @@ class LLMAnalystAgent(Agent):
         self.base_url = os.getenv("OPENAI_BASE_URL") or None
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
         self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
+        self._last_seen: Dict[str, Tuple[str, float]] = {}  # symbol -> (digest, ts)
 
         # Track why we might be disabled (shown in /health)
         self.disable_reason = None
@@ -483,6 +486,19 @@ class LLMAnalystAgent(Agent):
                     "tweaks": tweaks,
                 },
             }
+
+            sig_src = json.dumps({
+                "a": action,
+                "c": round(confidence, 2),
+                "r": rationale[:200],
+                "t": [(t.get("param"), float(t.get("delta", 0))) for t in tweaks[:5]],
+            }, sort_keys=True).encode("utf-8")
+            digest = hashlib.sha1(sig_src).hexdigest()
+            last = self._last_seen.get(symbol)
+            now = time.time()
+            if last and last[0] == digest and (now - last[1]) < 90:
+                return None  # suppress duplicate insert/post within 90s
+            self._last_seen[symbol] = (digest, now)
     
             # 4) Optional Slack ping from the agent itself (usually keep off;
             #     let the global poster handle cooldown/dedupe). Requires:
@@ -723,6 +739,11 @@ async def agents_loop():
             now = time.time()
             for agent in AGENTS:
                 for sym in SYMBOLS:
+                    #NEW: honor per-agent interval
+                    key = (agent.name, sym)
+                    if now - _last_run_ts[key] < max(1, int(getattr(agent, "interval_sec", 10))):
+                        continue
+                        
                     try:
                         finding = await agent.run_once(sym)
                         pg_agent_heartbeat(agent.name, "ok")
