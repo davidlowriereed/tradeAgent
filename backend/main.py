@@ -206,72 +206,6 @@ class RVOLSpikeAgent(Agent):
             return {"score": score, "label": label, "details": details}
         return None
 
-class CVDDivergenceAgent(Agent):
-    """Trap Spotter v0 — price up while CVD down (or reverse) over ~2 minutes."""
-    def __init__(self, window_sec=120, min_abs_cvd=25.0, min_price_bps=10, interval_sec=10):
-        super().__init__("cvd_divergence", interval_sec)
-        self.win = int(os.getenv("AGENT_CVD_WIN_SEC", str(window_sec)))
-        self.min_abs_cvd = float(os.getenv("AGENT_CVD_MIN", str(min_abs_cvd)))
-        self.min_price_bps = float(os.getenv("AGENT_CVD_MIN_BPS", str(min_price_bps)))
-
-    async def run_once(self, symbol):
-        # snapshot window
-        now = time.time()
-        window = [row for row in trades[symbol] if row[0] >= now - self.win]
-        if len(window) < 10:
-            return None
-
-        p0 = window[0][1]
-        p1 = window[-1][1]
-        price_change_bps = (p1 - p0) / p0 * 1e4  # basis points
-
-        # CVD delta over the window
-        # (approx: recompute CVD delta from subset instead of whole deque)
-        cvd_delta = 0.0
-        for _, _, size, side in window:
-            if side == "buy":
-                cvd_delta += size
-            elif side == "sell":
-                cvd_delta -= size
-
-        # Divergence: price ↑ & CVD ↓  OR price ↓ & CVD ↑
-        diverges = (price_change_bps > self.min_price_bps and cvd_delta < -self.min_abs_cvd) or \
-                   (price_change_bps < -self.min_price_bps and cvd_delta > self.min_abs_cvd)
-
-        if diverges:
-            score = min(10.0, abs(price_change_bps) / self.min_price_bps + abs(cvd_delta) / self.min_abs_cvd)
-            label = "cvd_divergence"
-            details = {
-                "price_bps": price_change_bps,
-                "cvd_delta": cvd_delta,
-                "window_sec": self.win
-            }
-            return {"score": score, "label": label, "details": details}
-        return None
-
-class MacroWatcher(Agent):
-    def __init__(self, interval_sec=600):
-        super().__init__("macro_watcher", interval_sec)
-        self.url = os.getenv("MACRO_FEED_URL")
-
-    async def run_once(self, symbol):
-        if not self.url: 
-            return None
-        try:
-            import httpx, re, datetime
-            r = await httpx.AsyncClient(timeout=10).get(self.url)
-            text = r.text[:100000]
-            # naive parse for items (works for many RSS feeds)
-            items = []
-            for m in re.finditer(r"<item>.*?<title>(.*?)</title>.*?</item>", text, re.S):
-                title = re.sub("<.*?>","",m.group(1))
-                items.append(title.strip())
-            if items:
-                return {"score": 1.0, "label": "macro_update", "details": {"items": items[:5]}}
-        except Exception:
-            pass
-        return None
-
 # ---- LLM Analyst Agent -------------------------------------------------------
 from typing import Any, List
 import math
@@ -417,167 +351,167 @@ class LLMAnalystAgent(Agent):
             "recent_findings": recent_findings,
         }
 
-def _prompt(self, ctx: dict) -> List[dict]:
-    sys = (
-        "You are the LLM Analyst Agent for a real-time trading system.\n"
-        "- You DO NOT place trades.\n"
-        "- Base your decision on the current `signals` and any recent NON-error findings only.\n"
-        "- Ignore connectivity/tooling errors (e.g., items labeled `llm_error`) and do NOT mention them.\n"
-        "- If live data is sparse (e.g., volume_5m == 0 and trades_5m == 0), choose 'observe' with low confidence.\n"
-        "Output VALID JSON only."
-    )
-    schema_hint = {
-        "type": "object",
-        "properties": {
-            "action": {"enum": ["observe","prepare","consider-entry","consider-exit"]},
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "rationale": {"type": "string"},
-            "tweaks": {
-                "type": "array",
-                "items": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "param": {"type": "string"},
-                                "delta": {"type": "number"},
-                                "reason": {"type": "string"}
+    def _prompt(self, ctx: dict) -> List[dict]:
+        sys = (
+            "You are the LLM Analyst Agent for a real-time trading system.\n"
+            "- You DO NOT place trades.\n"
+            "- Base your decision on the current `signals` and any recent NON-error findings only.\n"
+            "- Ignore connectivity/tooling errors (e.g., items labeled `llm_error`) and do NOT mention them.\n"
+            "- If live data is sparse (e.g., volume_5m == 0 and trades_5m == 0), choose 'observe' with low confidence.\n"
+            "Output VALID JSON only."
+        )
+        schema_hint = {
+            "type": "object",
+            "properties": {
+                "action": {"enum": ["observe","prepare","consider-entry","consider-exit"]},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "rationale": {"type": "string"},
+                "tweaks": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "param": {"type": "string"},
+                                    "delta": {"type": "number"},
+                                    "reason": {"type": "string"}
+                                },
+                                "required": ["param","delta","reason"]
                             },
-                            "required": ["param","delta","reason"]
-                        },
-                        {"type": "string"}  # also accept compact "PARAM:+0.1" forms
-                    ]
+                            {"type": "string"}  # also accept compact "PARAM:+0.1" forms
+                        ]
+                    }
                 }
-            }
-        },
-        "required": ["action","confidence","rationale","tweaks"]
-    }
-    user = {
-        "role": "user",
-        "content": (
-            "Context:\n"
-            f"{json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]}\n\n"
-            "Task:\n"
-            "1) Decide action: observe | prepare | consider-entry | consider-exit.\n"
-            "2) Provide a 1-2 sentence rationale in plain language. Do NOT mention tooling or connectivity.\n"
-            "3) Suggest 0-3 parameter tweaks for the Alpha-Optimizer (AOA). Either give\n"
-            "   objects {param, delta, reason} or compact strings like 'ALERT_MIN_RVOL:+0.1'.\n"
-            "Return ONLY JSON: {action, confidence, rationale, tweaks}."
-        )
-    }
-    return [
-        {"role": "system", "content": sys},
-        user,
-    ], schema_hint
-
-async def run_once(self, symbol) -> Optional[dict]:
-    if not self.enabled or self._client is None:
-        return None
-
-    import re, httpx
-
-    # 1) Build context and defensively drop error findings from it
-    ctx = await self._gather_context(symbol)
-    if isinstance(ctx.get("recent_findings"), list):
-        ctx["recent_findings"] = [
-            f for f in ctx["recent_findings"] if str(f.get("label")) != "llm_error"
-        ]
-
-    msgs, _schema = self._prompt(ctx)
-
-    # Helper: accept either dict tweaks or "PARAM:+0.1" strings and normalize
-    def _normalize_tweaks(t):
-        out = []
-        if not isinstance(t, list):
-            return out
-        for item in t:
-            if isinstance(item, dict):
-                param = str(item.get("param") or "").strip()
-                reason = str(item.get("reason") or "").strip() or "model-suggested"
-                try:
-                    delta = float(item.get("delta"))
-                except Exception:
-                    continue
-                if param:
-                    out.append({"param": param, "delta": delta, "reason": reason})
-            elif isinstance(item, str):
-                m = re.match(r"\s*([A-Za-z0-9_.:-]+)\s*:\s*([+\-]?\d+(?:\.\d+)?)", item)
-                if m:
-                    out.append({
-                        "param": m.group(1),
-                        "delta": float(m.group(2)),
-                        "reason": "compact format"
-                    })
-        return out[:5]
-
-    raw = None
-    try:
-        # 2) Call OpenAI in a thread to avoid blocking the loop
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self._client.chat.completions.create(
-                model=self.model,
-                messages=msgs,
-                response_format={"type": "json_object"},
-                temperature=0.2,
-                max_tokens=600,
-            )
-        )
-        raw = resp.choices[0].message.content or "{}"
-
-        # 3) Parse + sanitize
-        data = json.loads(raw)
-        action = (data.get("action") or "observe").strip()
-        try:
-            confidence = float(data.get("confidence") or 0.0)
-        except Exception:
-            confidence = 0.0
-        rationale = str(data.get("rationale") or "").strip()
-        tweaks = _normalize_tweaks(data.get("tweaks") or [])
-
-        # Clamp confidence + compute score
-        confidence = max(0.0, min(1.0, confidence))
-        score = max(0.0, min(10.0, confidence * 10.0))
-
-        finding = {
-            "score": score,
-            "label": "llm_analysis",
-            "details": {
-                "action": action,
-                "confidence": confidence,
-                "rationale": rationale[:600],
-                "tweaks": tweaks,
             },
+            "required": ["action","confidence","rationale","tweaks"]
         }
-
-        # 4) Optional Slack ping from the agent itself (usually keep off;
-        #     let the global poster handle cooldown/dedupe). Requires:
-        #     self.post_from_agent = env LLM_POST_FROM_AGENT=="true"
-        if getattr(self, "post_from_agent", False) and ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
-            txt = (
-                f"🧠 LLM Analyst | {symbol} | {action} "
-                f"(conf {confidence:.2f}) — {rationale[:160]}"
+        user = {
+            "role": "user",
+            "content": (
+                "Context:\n"
+                f"{json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]}\n\n"
+                "Task:\n"
+                "1) Decide action: observe | prepare | consider-entry | consider-exit.\n"
+                "2) Provide a 1-2 sentence rationale in plain language. Do NOT mention tooling or connectivity.\n"
+                "3) Suggest 0-3 parameter tweaks for the Alpha-Optimizer (AOA). Either give\n"
+                "   objects {param, delta, reason} or compact strings like 'ALERT_MIN_RVOL:+0.1'.\n"
+                "Return ONLY JSON: {action, confidence, rationale, tweaks}."
             )
-            try:
-                await httpx.AsyncClient(timeout=10).post(
-                    ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
-                )
-            except Exception:
-                pass
-
-        self._last_hash[symbol] = raw[:800]
-        return finding
-
-    except Exception as e:
-        err = f"{type(e).__name__}: {str(e)[:180]}"
-        det = {"error": err}
-        if raw:
-            det["raw"] = raw[:400]
-        return {
-            "score": 0.0,
-            "label": "llm_error",
-            "details": det,
         }
+        return [
+            {"role": "system", "content": sys},
+            user,
+        ], schema_hint
+
+    async def run_once(self, symbol) -> Optional[dict]:
+        if not self.enabled or self._client is None:
+            return None
+    
+        import re, httpx
+    
+        # 1) Build context and defensively drop error findings from it
+        ctx = await self._gather_context(symbol)
+        if isinstance(ctx.get("recent_findings"), list):
+            ctx["recent_findings"] = [
+                f for f in ctx["recent_findings"] if str(f.get("label")) != "llm_error"
+            ]
+    
+        msgs, _schema = self._prompt(ctx)
+    
+        # Helper: accept either dict tweaks or "PARAM:+0.1" strings and normalize
+        def _normalize_tweaks(t):
+            out = []
+            if not isinstance(t, list):
+                return out
+            for item in t:
+                if isinstance(item, dict):
+                    param = str(item.get("param") or "").strip()
+                    reason = str(item.get("reason") or "").strip() or "model-suggested"
+                    try:
+                        delta = float(item.get("delta"))
+                    except Exception:
+                        continue
+                    if param:
+                        out.append({"param": param, "delta": delta, "reason": reason})
+                elif isinstance(item, str):
+                    m = re.match(r"\s*([A-Za-z0-9_.:-]+)\s*:\s*([+\-]?\d+(?:\.\d+)?)", item)
+                    if m:
+                        out.append({
+                            "param": m.group(1),
+                            "delta": float(m.group(2)),
+                            "reason": "compact format"
+                        })
+            return out[:5]
+    
+        raw = None
+        try:
+            # 2) Call OpenAI in a thread to avoid blocking the loop
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._client.chat.completions.create(
+                    model=self.model,
+                    messages=msgs,
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                    max_tokens=600,
+                )
+            )
+            raw = resp.choices[0].message.content or "{}"
+    
+            # 3) Parse + sanitize
+            data = json.loads(raw)
+            action = (data.get("action") or "observe").strip()
+            try:
+                confidence = float(data.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            rationale = str(data.get("rationale") or "").strip()
+            tweaks = _normalize_tweaks(data.get("tweaks") or [])
+    
+            # Clamp confidence + compute score
+            confidence = max(0.0, min(1.0, confidence))
+            score = max(0.0, min(10.0, confidence * 10.0))
+    
+            finding = {
+                "score": score,
+                "label": "llm_analysis",
+                "details": {
+                    "action": action,
+                    "confidence": confidence,
+                    "rationale": rationale[:600],
+                    "tweaks": tweaks,
+                },
+            }
+    
+            # 4) Optional Slack ping from the agent itself (usually keep off;
+            #     let the global poster handle cooldown/dedupe). Requires:
+            #     self.post_from_agent = env LLM_POST_FROM_AGENT=="true"
+            if getattr(self, "post_from_agent", False) and ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
+                txt = (
+                    f"🧠 LLM Analyst | {symbol} | {action} "
+                    f"(conf {confidence:.2f}) — {rationale[:160]}"
+                )
+                try:
+                    await httpx.AsyncClient(timeout=10).post(
+                        ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
+                    )
+                except Exception:
+                    pass
+    
+            self._last_hash[symbol] = raw[:800]
+            return finding
+    
+        except Exception as e:
+            err = f"{type(e).__name__}: {str(e)[:180]}"
+            det = {"error": err}
+            if raw:
+                det["raw"] = raw[:400]
+            return {
+                "score": 0.0,
+                "label": "llm_error",
+                "details": det,
+            }
 
 
 AGENTS = [
@@ -775,7 +709,6 @@ def _blocks_for_llm(sym, finding):
     return blocks
 
 
-SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY", "false").lower() == "true"
 ALERT_VERBOSE       = os.getenv("ALERT_VERBOSE", "true").lower() == "true"
 AGENT_ALERT_COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
 _last_analysis_post: Dict[Tuple[str,str], float] = defaultdict(float)  # (agent,symbol)->ts
