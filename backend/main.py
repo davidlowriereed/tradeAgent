@@ -340,11 +340,11 @@ class LLMAnalystAgent(Agent):
                 # IMPORTANT:
                 # Never allow ambient env proxies to affect the OpenAI client unless explicitly requested.
                 # This avoids APIConnectionError where GET /models works but POST /chat/completions fails.
-                proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
                 use_proxy = os.getenv("LLM_USE_PROXY", "false").lower() == "true"
+                proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")                
 
                 if use_proxy and proxy_url:
-                    http_client = httpx.Client(proxy=proxy_url, timeout=30.0, trust_env=False)
+                    http_client = httpx.Client(proxy=proxy_url, timeout=30.0, http2=False, trust_env=False)
                 else:
                     http_client = httpx.Client(timeout=30.0, trust_env=False)
 
