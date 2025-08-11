@@ -8,7 +8,7 @@ import re
 from collections import defaultdict, deque
 from typing import Dict, Deque, Tuple, Optional
 import httpx
-
+from openai import OpenAI
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -290,20 +290,27 @@ class LLMAnalystAgent(Agent):
     ENV:
       LLM_ENABLE=true/false
       OPENAI_API_KEY=...
-      OPENAI_MODEL=gpt-4o-mini (default)
+      OPENAI_MODEL=gpt-4o-mini (default; falls back to LLM_MODEL)
+      LLM_MODEL= (optional fallback)
       OPENAI_BASE_URL= (optional, OpenAI-compatible)
       LLM_MIN_INTERVAL=180
       LLM_MAX_INPUT_TOKENS=4000
       LLM_ALERT_MIN_CONF=0.65
-      # Optional proxy support:
-      HTTP_PROXY / HTTPS_PROXY
+
+      # Proxy controls:
+      # By default, the OpenAI httpx client ignores env proxies (trust_env=False)
+      # Set LLM_USE_PROXY=true to force using HTTP(S)_PROXY explicitly.
+      HTTP_PROXY / HTTPS_PROXY (used only if LLM_USE_PROXY=true)
+      LLM_USE_PROXY=true|false
     """
+
     def __init__(self, interval_sec=None):
         enabled = os.getenv("LLM_ENABLE", "false").lower() == "true"
         poll = int(os.getenv("LLM_MIN_INTERVAL", "180"))
         super().__init__("llm_analyst", interval_sec or poll)
 
         self.enabled = enabled
+        # Model selection with fallback; prevents invalid values like "gpt-5" from breaking silently
         self.model = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         self.base_url = os.getenv("OPENAI_BASE_URL") or None
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
@@ -323,19 +330,27 @@ class LLMAnalystAgent(Agent):
         else:
             # Try to construct the OpenAI client (no invalid 'proxies=' kwarg)
             try:
+                import httpx
                 from openai import OpenAI
+
                 client_kwargs = {"api_key": api_key}
                 if self.base_url:
                     client_kwargs["base_url"] = self.base_url
 
-                # Optional proxy via httpx.Client
+                # IMPORTANT:
+                # Never allow ambient env proxies to affect the OpenAI client unless explicitly requested.
+                # This avoids APIConnectionError where GET /models works but POST /chat/completions fails.
                 proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-                use_proxy = (os.getenv("LLM_IGNORE_PROXY", "false").lower() != "true")
-                if proxy_url and use_proxy:
-                    import httpx as _httpx
-                    client_kwargs["http_client"] = _httpx.Client(proxy=proxy_url, timeout=30.0)
+                use_proxy = os.getenv("LLM_USE_PROXY", "false").lower() == "true"
 
+                if use_proxy and proxy_url:
+                    http_client = httpx.Client(proxy=proxy_url, timeout=30.0, trust_env=False)
+                else:
+                    http_client = httpx.Client(timeout=30.0, trust_env=False)
+
+                client_kwargs["http_client"] = http_client
                 self._client = OpenAI(**client_kwargs)
+
             except ImportError:
                 self.enabled = False
                 self.disable_reason = "OpenAI SDK not installed (add `openai` to requirements.txt)"
@@ -345,7 +360,6 @@ class LLMAnalystAgent(Agent):
 
         # tiny memory to reduce duplicate outputs
         self._last_hash: Dict[str, str] = {}
-
 
     async def _gather_context(self, symbol: str) -> dict:
         # current live signals
@@ -455,6 +469,7 @@ class LLMAnalystAgent(Agent):
 
         raw = None
         try:
+            # Use a thread to avoid blocking the event loop
             resp = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self._client.chat.completions.create(
@@ -511,25 +526,6 @@ class LLMAnalystAgent(Agent):
                 "details": det,
             }
 
-
-
-            # optional Slack/Discord ping for higher-confidence calls
-            if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
-                txt = (
-                    f"🧠 LLM Analyst | {symbol} | {action} "
-                    f"(conf {confidence:.2f}) — {rationale[:160]}"
-                )
-                try:
-                    await httpx.AsyncClient(timeout=10).post(
-                        ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
-                    )
-                except Exception:
-                    pass
-
-            return finding
-
-        except Exception:
-            return None
 
 
 AGENTS = [
