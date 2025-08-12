@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 import httpx
 from fastapi import FastAPI, Query, Body
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, HTMLResponse
+import os
 
 # -------------------------------
 # Globals / In-memory state
@@ -758,6 +759,23 @@ async def agents_loop():
 # FastAPI app & endpoints
 # -------------------------------
 app = FastAPI()
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    # Serve the dashboard HTML that lives alongside main.py
+    here = os.path.dirname(__file__)
+    index_path = os.path.join(here, "index.html")
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    except Exception:
+        # Fallback (so the app still responds if file is missing)
+        return HTMLResponse(
+            "<h3>Opportunity Radar (Alpha)</h3>"
+            "<p>See <a href='/signals'>/signals</a>, "
+            "<a href='/findings'>/findings</a>, "
+            "<a href='/health'>/health</a></p>"
+        )
 
 @app.on_event("startup")
 async def _startup():
