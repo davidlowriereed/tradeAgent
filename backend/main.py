@@ -33,6 +33,9 @@ hist_5m: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=48))
 best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
 best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
 db_buffer: Dict[str, Deque[Tuple[str,str,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=20000))
+from collections import defaultdict
+POSTURE_STATE = defaultdict(dict)  # symbol -> {state, started_at, base_low, entry_price, peak_price}
+POSTURE_ENTRY_CONF = float(os.getenv("POSTURE_ENTRY_CONF", "0.60"))
 
 # ---------- Alerts (webhook is optional) ----------
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord webhook
@@ -247,6 +250,82 @@ class RVOLSpikeAgent(Agent):
             }
             return {"score": score, "label": label, "details": details}
         return None
+
+class PostureGuardAgent(Agent):
+    def __init__(self, interval_sec=None):
+        super().__init__("posture_guard", interval_sec or 60)
+        self._last_score = {}  # symbol -> last score
+
+    async def run_once(self, symbol):
+        st = POSTURE_STATE.get(symbol)
+        if not st or st.get("state") != "long_bias":
+            return None  # only guard when long bias is active
+
+        now = time.time()
+        # --- compute flow over last 5/15 min directly from trades buffer ---
+        window5 = [r for r in trades[symbol] if r[0] >= now - 300]
+        window15 = [r for r in trades[symbol] if r[0] >= now - 900]
+
+        def cvd_delta(win):
+            # r = (ts, price, size, side) where side=+1 buy, -1 sell (assumed)
+            # adapt if your tuple differs
+            try:
+                return sum((w[2] or 0.0) * (w[3] or 0.0) for w in win)
+            except Exception:
+                return 0.0
+
+        d5 = cvd_delta(window5)
+        # rough slope proxy: 15m delta / 15m duration
+        slope15 = cvd_delta(window15) / max(1, len(window15))
+
+        # --- RVOL balance: compare med RVOL of red vs green bars (approx) ---
+        # proxy: volume on down-ticks vs up-ticks
+        up_vol = sum((w[2] or 0.0) for w in window15 if (w[3] or 0) > 0)
+        dn_vol = sum((w[2] or 0.0) for w in window15 if (w[3] or 0) < 0)
+        rvol_ratio = (dn_vol + 1e-9) / (up_vol + 1e-9)  # >1 favors selling
+
+        sig = compute_signals(symbol)
+        px = sig.get("best_bid") or sig.get("best_ask")
+        base_low = st.get("base_low", px)
+        mom5_bps = 0.0
+        if window5:
+            p0, p1 = window5[0][1], window5[-1][1]
+            if p0:
+                mom5_bps = (p1 - p0) / p0 * 1e4
+
+        # --- thresholds (tweak per symbol) ---
+        CVD_FLIP = float(os.getenv("PG_CVD_5M_NEG", "2000"))  # negative by this much = flow flip
+        RVOL_RED_OVER_GREEN = float(os.getenv("PG_RVOL_RATIO", "1.2"))
+        MOM5_DOWN = float(os.getenv("PG_MOM5_DOWN_BPS", "-10"))
+
+        # --- score: need 2 of 3 ---
+        s = 0
+        reasons = []
+        if d5 <= -CVD_FLIP and slope15 <= 0:
+            s += 1; reasons.append(f"Flow flip: ΔCVD5={d5:.0f}, slope15<=0")
+        if rvol_ratio >= RVOL_RED_OVER_GREEN:
+            s += 1; reasons.append(f"RVOL red/green={rvol_ratio:.2f}≥{RVOL_RED_OVER_GREEN}")
+        if (px is not None) and (px < base_low or mom5_bps <= MOM5_DOWN):
+            s += 1; reasons.append(f"Structure: mom5={mom5_bps:.0f}bps or lost base")
+
+        # require 2/3 for two consecutive checks
+        prev = self._last_score.get(symbol, 0)
+        self._last_score[symbol] = s
+        if s >= 2 and prev >= 2:
+            # clear posture and emit exit
+            POSTURE_STATE.pop(symbol, None)
+            return {
+                "score": 8.0,
+                "label": "posture_exit",
+                "details": {
+                    "action": "consider-exit",
+                    "confidence": 0.8,
+                    "reasons": reasons[:3],
+                    "delta5": d5, "rvol_ratio": rvol_ratio, "mom5_bps": mom5_bps,
+                }
+            }
+        return None
+
 
 # ---- LLM Analyst Agent -------------------------------------------------------
 from typing import Any, List
@@ -1251,12 +1330,14 @@ async def llm_config():
     }
 _last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
 # --- register agents (after class definitions) ---
-AGENTS: list[Agent] = [
+AGENTS = [
     RVOLSpikeAgent(),
     CVDDivergenceAgent(),
-    MacroWatcher(),   # only active if MACRO_FEED_URL is set
-    LLMAnalystAgent() # only active if LLM_ENABLE=true and key present
+    MacroWatcher(),
+    LLMAnalystAgent(),
+    PostureGuardAgent(),     # <— new
 ]
+
 
 @app.on_event("startup")
 async def startup_event():
