@@ -16,12 +16,13 @@ from .agents.trend_score import TrendScoreAgent
 from .agents.llm_analyst import LLMAnalystAgent
 from .agents.posture_guard import PostureGuardAgent
 
-AGENTS: List[Agent] = [
+AGENTS = [
     RVOLSpikeAgent(),
     CvdDivergenceAgent(),
     TrendScoreAgent(),
     LLMAnalystAgent(),
     PostureGuardAgent(),
+    MacroWatcherAgent(),  # <= add this
 ]
 
 _last_run_ts: dict[tuple, float] = defaultdict(lambda: 0.0)
