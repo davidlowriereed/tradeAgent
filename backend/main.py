@@ -252,79 +252,122 @@ class RVOLSpikeAgent(Agent):
         return None
 
 class PostureGuardAgent(Agent):
-    def __init__(self, interval_sec=None):
-        super().__init__("posture_guard", interval_sec or 60)
-        self._last_score = {}  # symbol -> last score
+    def __init__(self, interval_sec: int | None = None):
+        super().__init__("posture_guard", interval_sec or int(os.getenv("POSTURE_GUARD_INTERVAL", "60")))
+        self._last_score: dict[str, int] = {}   # for two-step confirmation
+        self._persist: dict[str, dict] = {}     # consecutive-cue counters
 
-    async def run_once(self, symbol):
+    async def run_once(self, symbol: str) -> Optional[dict]:
         st = POSTURE_STATE.get(symbol)
         if not st or st.get("state") != "long_bias":
-            return None  # only guard when long bias is active
+            # reset persistence when posture is gone
+            self._persist.pop(symbol, None)
+            return None
 
         now = time.time()
-        # --- compute flow over last 5/15 min directly from trades buffer ---
-        window5 = [r for r in trades[symbol] if r[0] >= now - 300]
-        window15 = [r for r in trades[symbol] if r[0] >= now - 900]
 
-        def cvd_delta(win):
-            # r = (ts, price, size, side) where side=+1 buy, -1 sell (assumed)
-            # adapt if your tuple differs
-            try:
-                return sum((w[2] or 0.0) * (w[3] or 0.0) for w in win)
-            except Exception:
-                return 0.0
+        # --- windows ---
+        w2  = [r for r in trades[symbol] if r[0] >= now - 120]
+        w5  = [r for r in trades[symbol] if r[0] >= now - 300]
+        w15 = [r for r in trades[symbol] if r[0] >= now - 900]
 
-        d5 = cvd_delta(window5)
-        # rough slope proxy: 15m delta / 15m duration
-        slope15 = cvd_delta(window15) / max(1, len(window15))
+        def cvd_delta(win) -> float:
+            total = 0.0
+            for _, _, sz, sd in win:
+                if sd == "buy":  total += (sz or 0.0)
+                elif sd == "sell": total -= (sz or 0.0)
+            return total
 
-        # --- RVOL balance: compare med RVOL of red vs green bars (approx) ---
-        # proxy: volume on down-ticks vs up-ticks
-        up_vol = sum((w[2] or 0.0) for w in window15 if (w[3] or 0) > 0)
-        dn_vol = sum((w[2] or 0.0) for w in window15 if (w[3] or 0) < 0)
-        rvol_ratio = (dn_vol + 1e-9) / (up_vol + 1e-9)  # >1 favors selling
+        d2, d5 = cvd_delta(w2), cvd_delta(w5)
+        s15 = cvd_delta(w15) / max(1, len(w15))
+
+        up_vol = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "buy")
+        dn_vol = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "sell")
+        rvol_ratio = (dn_vol + 1e-9) / (up_vol + 1e-9)
+        push_rvol  = up_vol / max(1e-9, up_vol + dn_vol)
+
+        mom5_bps = 0.0
+        if w5:
+            p0, p1 = w5[0][1], w5[-1][1]
+            if p0: mom5_bps = (p1 - p0) / p0 * 1e4
 
         sig = compute_signals(symbol)
         px = sig.get("best_bid") or sig.get("best_ask")
         base_low = st.get("base_low", px)
-        mom5_bps = 0.0
-        if window5:
-            p0, p1 = window5[0][1], window5[-1][1]
-            if p0:
-                mom5_bps = (p1 - p0) / p0 * 1e4
 
-        # --- thresholds (tweak per symbol) ---
-        CVD_FLIP = float(os.getenv("PG_CVD_5M_NEG", "2000"))  # negative by this much = flow flip
-        RVOL_RED_OVER_GREEN = float(os.getenv("PG_RVOL_RATIO", "1.2"))
-        MOM5_DOWN = float(os.getenv("PG_MOM5_DOWN_BPS", "-10"))
+        vwin_min = int(os.getenv("PG_VWAP_MINUTES", "20"))
+        wv = [r for r in trades[symbol] if r[0] >= now - 60*vwin_min]
+        vwap = None
+        if wv:
+            num = sum((r[1] or 0.0)*(r[2] or 0.0) for r in wv)
+            den = sum((r[2] or 0.0) for r in wv)
+            vwap = (num/den) if den else None
 
-        # --- score: need 2 of 3 ---
-        s = 0
-        reasons = []
-        if d5 <= -CVD_FLIP and slope15 <= 0:
-            s += 1; reasons.append(f"Flow flip: ΔCVD5={d5:.0f}, slope15<=0")
-        if rvol_ratio >= RVOL_RED_OVER_GREEN:
-            s += 1; reasons.append(f"RVOL red/green={rvol_ratio:.2f}≥{RVOL_RED_OVER_GREEN}")
-        if (px is not None) and (px < base_low or mom5_bps <= MOM5_DOWN):
-            s += 1; reasons.append(f"Structure: mom5={mom5_bps:.0f}bps or lost base")
+        # thresholds
+        CVD5    = float(os.getenv("PG_CVD_5M_NEG", "1500"))
+        CVD2    = float(os.getenv("PG_CVD_2M_NEG", "800"))
+        RVR     = float(os.getenv("PG_RVOL_RATIO", "1.2"))
+        PUSHMIN = float(os.getenv("PG_PUSH_RVOL_MIN", "0.7"))
+        MOM5    = float(os.getenv("PG_MOM5_DOWN_BPS", "-8"))
+        MAX_AGE = 60 * float(os.getenv("POSTURE_MAX_AGE_MIN", "30"))
+        PERSIST_K = int(os.getenv("PG_PERSIST_K", "5"))         # K consecutive checks
+        DD_SLOW   = float(os.getenv("PG_DD_SLOW_BPS", "-60"))   # slow drawdown exit (bps)
 
-        # require 2/3 for two consecutive checks
+        # aging/peak
+        time_in_state   = now - st.get("started_at", now)
+        time_since_peak = now - st.get("peak_ts", st.get("started_at", now))
+        if px and px >= st.get("peak_price", px):
+            st["peak_price"], st["peak_ts"] = px, now
+
+        # cues
+        flow_flip = (d5 <= -CVD5) or (d2 <= -CVD2) or (s15 <= 0)
+        rvol_flip = (rvol_ratio >= RVR) or (push_rvol < PUSHMIN)
+        structure_break = ((px is not None and base_low is not None and px < base_low) or
+                           (vwap is not None and px is not None and px < vwap) or
+                           (mom5_bps <= MOM5))
+        aging = (time_in_state > MAX_AGE and time_since_peak > 300)
+
+        # persistence counters
+        pc = self._persist.setdefault(symbol, {"flow":0, "rvol":0, "structure":0})
+        pc["flow"]      = pc["flow"] + 1 if flow_flip else 0
+        pc["rvol"]      = pc["rvol"] + 1 if rvol_flip else 0
+        pc["structure"] = pc["structure"] + 1 if structure_break else 0
+
+        # fast-break (optional, if you added earlier)
+        # ... (keep your existing fast-break here) ...
+
+        # standard 2-of-4 with consecutive check
+        score = int(flow_flip) + int(rvol_flip) + int(structure_break) + int(aging)
         prev = self._last_score.get(symbol, 0)
-        self._last_score[symbol] = s
-        if s >= 2 and prev >= 2:
-            # clear posture and emit exit
+        self._last_score[symbol] = score
+        if score >= 2 and prev >= 2:
             POSTURE_STATE.pop(symbol, None)
-            return {
-                "score": 8.0,
-                "label": "posture_exit",
-                "details": {
-                    "action": "consider-exit",
-                    "confidence": 0.8,
-                    "reasons": reasons[:3],
-                    "delta5": d5, "rvol_ratio": rvol_ratio, "mom5_bps": mom5_bps,
-                }
-            }
+            return {"score": 8.0, "label": "posture_exit",
+                    "details": {"action":"consider-exit","confidence":0.8,
+                                "reasons":["2-of-4 cues twice"], 
+                                "metrics":{"d2":d2,"d5":d5,"rvol_ratio":rvol_ratio,"mom5_bps":mom5_bps,"vwap":vwap,"px":px,"base_low":base_low}}}
+
+        # NEW: persistence exit — one strong cue kept showing up
+        if pc["structure"] >= PERSIST_K or pc["flow"] >= PERSIST_K:
+            POSTURE_STATE.pop(symbol, None)
+            return {"score": 7.5, "label": "posture_exit",
+                    "details": {"action":"consider-exit","confidence":0.75,
+                                "reasons":[f"Persistent { 'structure' if pc['structure']>=PERSIST_K else 'flow' } weakness"],
+                                "metrics":{"mom5_bps":mom5_bps,"vwap":vwap,"px":px}}}
+
+        # NEW: slow drawdown exit — far off the peak even without huge ΔCVD
+        dd_from_peak_bps = 0.0
+        if px and st.get("peak_price"):
+            dd_from_peak_bps = (px - st["peak_price"]) / st["peak_price"] * 1e4
+        if dd_from_peak_bps <= DD_SLOW and ((vwap and px and px < vwap) or mom5_bps <= MOM5):
+            POSTURE_STATE.pop(symbol, None)
+            return {"score": 7.5, "label": "posture_exit",
+                    "details": {"action":"consider-exit","confidence":0.75,
+                                "reasons":[f"Slow drawdown {dd_from_peak_bps:.0f}bps with weak structure"],
+                                "metrics":{"dd_from_peak_bps":dd_from_peak_bps,"vwap":vwap,"px":px,"mom5_bps":mom5_bps}}}
+
         return None
+
 
 
 # ---- LLM Analyst Agent -------------------------------------------------------
