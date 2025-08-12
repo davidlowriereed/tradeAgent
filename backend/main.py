@@ -1,472 +1,377 @@
-import asyncio
-import csv
-import io
-import json
-import os
-import re
+import os, time, json, asyncio, math, hashlib, csv, io
+from typing import Optional, List, Dict, Any, Tuple
 from collections import defaultdict, deque
-from typing import Dict, Deque, Tuple, Optional
+
 import httpx
-from openai import OpenAI
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-import websockets
-import hashlib, time
+from fastapi import FastAPI, Query, Body
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, HTMLResponse
 
+# -------------------------------
+# Globals / In-memory state
+# -------------------------------
+SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").split(",") if s.strip()]
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL") or ""
+SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY", "true").lower() == "true"
+ALERT_VERBOSE = os.getenv("ALERT_VERBOSE", "false").lower() == "true"
 
-DB_URL = os.getenv("DATABASE_URL", None)
-SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC-USD")).split(",") if s.strip()]
-WS_URL = "wss://ws-feed.exchange.coinbase.com"
-
-LLM_ALERT_MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
-ALERT_RATIONALE_CHARS = int(os.getenv("ALERT_RATIONALE_CHARS", "280"))
-LLM_ANALYST_MIN_SCORE = float(os.getenv("LLM_ANALYST_MIN_SCORE", "2.0"))
-
-# ---------- In-memory state (per symbol) ----------
-MAX_TICKS = 5000
-RV_SECS = 300  # 5 minutes
-
-trades: Dict[str, Deque[Tuple[float,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=MAX_TICKS))
-cvd: Dict[str, float] = defaultdict(float)
-hist_5m: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=48))
-best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
-best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
-db_buffer: Dict[str, Deque[Tuple[str,str,float,float,Optional[str]]]] = defaultdict(lambda: deque(maxlen=20000))
-from collections import defaultdict
-POSTURE_STATE = defaultdict(dict)  # symbol -> {state, started_at, base_low, entry_price, peak_price}
+LLM_ANALYST_MIN_SCORE = float(os.getenv("LLM_ANALYST_MIN_SCORE", "3.0"))
+LLM_ALERT_MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.60"))
 POSTURE_ENTRY_CONF = float(os.getenv("POSTURE_ENTRY_CONF", "0.60"))
-
-# ---------- Alerts (webhook is optional) ----------
-ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord webhook
-ALERT_MIN_RVOL = float(os.getenv("ALERT_MIN_RVOL", "2.0"))      # e.g., 2.0x
-ALERT_CVD_DELTA = float(os.getenv("ALERT_CVD_DELTA", "50"))     # abs change in CVD within 5m window
-ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC", "180"))# per symbol
-
-last_alert_ts: Dict[str, float] = defaultdict(lambda: 0.0)
-
-app = FastAPI()
-
-# tiny HTML page
-TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
-env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape())
-
-# --- per-agent alert gating ---
-AGENT_ALERT_MIN_SCORE_DEFAULT = float(os.getenv("AGENT_ALERT_MIN_SCORE_DEFAULT", "3.0"))
-AGENT_ALERT_MIN_SCORE_CVD     = float(os.getenv("AGENT_ALERT_MIN_SCORE_CVD", "8.0"))
-AGENT_ALERT_MIN_SCORE_RVOL    = float(os.getenv("AGENT_ALERT_MIN_SCORE_RVOL", "2.5"))
-AGENT_ALERT_COOLDOWN_SEC      = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
-
-_last_agent_alert_ts = {}  # key: (agent, sym) -> ts
-
-ALERT_VERBOSE       = os.getenv("ALERT_VERBOSE", "true").lower() == "true"
 AGENT_ALERT_COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC", "120"))
-_last_analysis_post: Dict[Tuple[str,str], float] = defaultdict(float)  # (agent,symbol)->ts
-SLACK_ANALYSIS_ONLY = os.getenv("SLACK_ANALYSIS_ONLY","false").lower() == "true"
 
-# ---------- Optional Postgres ----------
+# TrendScore thresholds
+TS_INTERVAL = int(os.getenv("TS_INTERVAL", "30"))
+TS_ENTRY = float(os.getenv("TS_ENTRY", "0.65"))
+TS_EXIT = float(os.getenv("TS_EXIT", "0.35"))
+TS_PERSIST = int(os.getenv("TS_PERSIST", "2"))
+TS_WEIGHTS = os.getenv("TS_WEIGHTS", "default")
+
+# Posture guard cadence (can be overridden by env)
+POSTURE_GUARD_INTERVAL = int(os.getenv("POSTURE_GUARD_INTERVAL", "60"))
+
+# Trades buffer (ts, price, size, side) side in {"buy","sell"}
+trades: Dict[str, deque] = {sym: deque(maxlen=50_000) for sym in SYMBOLS}
+
+# A minimal price cache (best bid/ask) – populate externally in your streamer
+best_px: Dict[str, Tuple[float, float]] = {sym: (None, None) for sym in SYMBOLS}
+
+# DB stub wiring (your project already has a pg_* implementation; keep names consistent)
 pg_conn = None
-async def pg_connect():
+def pg_connect_sync():
     global pg_conn
-    if DB_URL is None:
-        return None
     try:
         import psycopg2
+        DB_URL = os.getenv("DATABASE_URL")
+        if not DB_URL:
+            return
         pg_conn = psycopg2.connect(DB_URL)
         pg_conn.autocommit = True
         with pg_conn.cursor() as cur:
-                    
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trades_crypto (
-                    id BIGSERIAL PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    ts_utc TIMESTAMPTZ NOT NULL,
-                    price DOUBLE PRECISION,
-                    size DOUBLE PRECISION,
-                    side TEXT
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS findings (
-                    id BIGSERIAL PRIMARY KEY,
-                    agent TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    ts_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    score DOUBLE PRECISION NOT NULL,
-                    label TEXT NOT NULL,
-                    details JSONB DEFAULT '{}'::jsonb
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_runs (
-                    id BIGSERIAL PRIMARY KEY,
-                    agent TEXT NOT NULL,
-                    ts_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    status TEXT NOT NULL,
-                    note TEXT
-                );
-                """
-            )
-        return pg_conn
-    except Exception:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS findings (
+              ts_utc TIMESTAMPTZ DEFAULT NOW(),
+              agent TEXT,
+              symbol TEXT,
+              score DOUBLE PRECISION,
+              label TEXT,
+              details JSONB
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_runs (
+              ts_utc TIMESTAMPTZ DEFAULT NOW(),
+              agent TEXT,
+              status TEXT
+            );
+            """)
+            # helpful indexes
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_findings_symbol_ts ON findings(symbol, ts_utc DESC);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_ts ON agent_runs(agent, ts_utc DESC);")
+    except Exception as e:
         pg_conn = None
-        return None
-        
-class Agent:
-    name: str
-    interval_sec: int
 
-    def __init__(self, name, interval_sec=10):
+async def pg_connect():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, pg_connect_sync)
+
+def pg_insert_finding(agent: str, symbol: str, score: float, label: str, details: dict):
+    try:
+        if pg_conn is None:
+            return
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO findings(agent, symbol, score, label, details) VALUES (%s,%s,%s,%s,%s)",
+                (agent, symbol, score, label, json.dumps(details)),
+            )
+    except Exception:
+        pass
+
+def pg_agent_heartbeat(agent: str, status: str = "ok"):
+    try:
+        if pg_conn is None:
+            return
+        with pg_conn.cursor() as cur:
+            cur.execute("INSERT INTO agent_runs(agent, status) VALUES (%s,%s)", (agent, status))
+    except Exception:
+        pass
+
+# -------------------------------
+# Utility: compute_signals
+# -------------------------------
+def compute_signals(symbol: str) -> dict:
+    """
+    Derive quick signals from the trades buffer.
+    """
+    now = time.time()
+    buf = trades[symbol]
+    w5 = [r for r in buf if r[0] >= now - 300]
+    w15 = [r for r in buf if r[0] >= now - 900]
+
+    def cvd(win):
+        total = 0.0
+        for _, _, sz, sd in win:
+            if sd == "buy": total += (sz or 0.0)
+            elif sd == "sell": total -= (sz or 0.0)
+        return total
+
+    cvd5 = cvd(w5)
+
+    vol5 = sum((r[2] or 0.0) for r in w5)
+    # naive recent baseline = average 5m volume over last 15m
+    recent = (sum((r[2] or 0.0) for r in w15) / 3.0) if w15 else 0.0
+    rvol_vs_recent = (vol5 / recent) if recent > 0 else None
+
+    bid, ask = best_px.get(symbol, (None, None))
+    trades_cached = len(buf)
+
+    # 5m momentum bps
+    mom5_bps = 0.0
+    if w5:
+        p0, p1 = w5[0][1], w5[-1][1]
+        if p0: mom5_bps = (p1 - p0) / p0 * 1e4
+
+    return {
+        "cvd": cvd5,
+        "volume_5m": vol5,
+        "rvol_vs_recent": rvol_vs_recent,
+        "best_bid": bid,
+        "best_ask": ask,
+        "trades_cached": trades_cached,
+        "mom5_bps": mom5_bps,
+    }
+
+# -------------------------------
+# Minimal Slack helpers
+# -------------------------------
+_last_post_digest: Dict[Tuple[str,str], float] = defaultdict(float)
+
+async def _post_webhook(blocks_or_text: dict | str):
+    if not ALERT_WEBHOOK_URL:
+        return
+    payload = {"text": blocks_or_text} if isinstance(blocks_or_text, str) else blocks_or_text
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(ALERT_WEBHOOK_URL, json=payload)
+    except Exception:
+        pass
+
+def _should_post(agent: str, symbol: str, score: float) -> bool:
+    now = time.time()
+    key = (agent, symbol)
+    # cooldown per agent/symbol
+    if now - _last_post_digest[key] < AGENT_ALERT_COOLDOWN_SEC:
+        return False
+    # simple digest by time window + score
+    _last_post_digest[key] = now
+    return True
+
+# -------------------------------
+# Agent base
+# -------------------------------
+class Agent:
+    def __init__(self, name: str, interval_sec: int = 60):
         self.name = name
         self.interval_sec = interval_sec
-        self.post_from_agent = os.getenv("LLM_POST_FROM_AGENT", "false").lower() == "true"
-
-    async def run_once(self, symbol) -> Optional[dict]:
-        """Return a finding dict or None."""
-        raise NotImplementedError
-
-class CVDDivergenceAgent(Agent):
-    """
-    Trap Spotter v0 — divergence between price and CVD over a short window.
-    Emits a higher score when both price move (in bps) and CVD delta (abs) are large.
-    Env tweaks:
-      AGENT_CVD_WIN_SEC   (default 120)
-      AGENT_CVD_MIN       (default 25.0)   # min |CVD delta| over window
-      AGENT_CVD_MIN_BPS   (default 10)     # min |price change| in basis points
-    """
-    def __init__(self, window_sec=120, min_abs_cvd=25.0, min_price_bps=10, interval_sec=10):
-        super().__init__("cvd_divergence", interval_sec)
-        self.win = int(os.getenv("AGENT_CVD_WIN_SEC", str(window_sec)))
-        self.min_abs_cvd = float(os.getenv("AGENT_CVD_MIN", str(min_abs_cvd)))
-        self.min_price_bps = float(os.getenv("AGENT_CVD_MIN_BPS", str(min_price_bps)))
-
-    async def run_once(self, symbol):
-        now = time.time()
-        window = [row for row in trades[symbol] if row[0] >= now - self.win]
-        if len(window) < 12:
-            return None
-
-        p0 = window[0][1]
-        p1 = window[-1][1]
-        if p0 <= 0:
-            return None
-
-        price_bps = (p1 - p0) / p0 * 1e4  # basis points
-        cvd_delta = 0.0
-        for _, _, size, side in window:
-            if side == "buy":
-                cvd_delta += size
-            elif side == "sell":
-                cvd_delta -= size
-
-        # Divergence: price ↑ & CVD ↓  OR price ↓ & CVD ↑
-        diverges = (price_bps > self.min_price_bps and cvd_delta < -self.min_abs_cvd) or \
-                   (price_bps < -self.min_price_bps and cvd_delta >  self.min_abs_cvd)
-
-        if not diverges:
-            return None
-
-        # Score scales with both magnitudes (cap at 10 for simplicity)
-        score = min(10.0,
-                    abs(price_bps) / max(1.0, self.min_price_bps) +
-                    abs(cvd_delta) / max(1.0, self.min_abs_cvd))
-
-        return {
-            "score": score,
-            "label": "cvd_divergence",
-            "details": {
-                "window_sec": self.win,
-                "price_bps": price_bps,
-                "cvd_delta": cvd_delta,
-                "p0": p0, "p1": p1
-            }
-        }
-
-class MacroWatcher(Agent):
-    """
-    Macro Watcher v0 — polls a macro/news feed and emits a low-score finding
-    so the system can include it as context. Optional; set MACRO_FEED_URL.
-      MACRO_FEED_URL       (required to enable)
-      MACRO_MIN_INTERVAL   (seconds between polls; default 600)
-    """
-    def __init__(self, interval_sec=None):
-        poll = int(os.getenv("MACRO_MIN_INTERVAL", "600"))
-        super().__init__("macro_watcher", interval_sec or poll)
-        self.url = os.getenv("MACRO_FEED_URL")
-        self._recent = deque(maxlen=200)   # crude de-dupe cache
-
-    async def run_once(self, symbol):
-        if not self.url:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(self.url)
-            txt = r.text[:200_000]
-
-            # naive RSS/Atom scrape for <title>...</title>
-            import re, html
-            titles = []
-            for m in re.finditer(r"<title>(.*?)</title>", txt, re.I | re.S):
-                t = re.sub("<.*?>", "", m.group(1)).strip()
-                t = html.unescape(t)
-                if t and t.lower() not in ("rss", "feed") and t not in self._recent:
-                    self._recent.append(t)
-                    titles.append(t)
-            if not titles:
-                return None
-
-            return {
-                "score": 1.0,                 # low weight; contextual
-                "label": "macro_update",
-                "details": {"items": titles[:5]}
-            }
-        except Exception:
-            return None
-
-
-class RVOLSpikeAgent(Agent):
-    """Manipulation Hunter v0 — flags high relative volume bursts."""
-    def __init__(self, min_rvol=2.5, interval_sec=10):
-        super().__init__("rvol_spike", interval_sec)
-        self.min_rvol = float(os.getenv("AGENT_RVOL_MIN", str(min_rvol)))
-
-    async def run_once(self, symbol):
-        # reuse compute_signals() for per-symbol features
-        sig = compute_signals(symbol)
-        rvol = sig.get("rvol_vs_recent") or 0.0
-        if rvol >= self.min_rvol and sig["volume_5m"] > 0:
-            score = min(10.0, rvol)  # simple score
-            label = "rvol_spike"
-            details = {
-                "rvol": rvol,
-                "volume_5m": sig["volume_5m"],
-                "best_bid": sig["best_bid"],
-                "best_ask": sig["best_ask"],
-            }
-            return {"score": score, "label": label, "details": details}
-        return None
-
-class PostureGuardAgent(Agent):
-    def __init__(self, interval_sec: int | None = None):
-        super().__init__("posture_guard", interval_sec or int(os.getenv("POSTURE_GUARD_INTERVAL", "60")))
-        self._last_score: dict[str, int] = {}   # for two-step confirmation
-        self._persist: dict[str, dict] = {}     # consecutive-cue counters
 
     async def run_once(self, symbol: str) -> Optional[dict]:
-        st = POSTURE_STATE.get(symbol)
-        if not st or st.get("state") != "long_bias":
-            # reset persistence when posture is gone
-            self._persist.pop(symbol, None)
-            return None
+        raise NotImplementedError
 
+# -------------------------------
+# RVOL spike agent (toy, deterministic)
+# -------------------------------
+class RVOLSpikeAgent(Agent):
+    def __init__(self, interval_sec: int | None = None):
+        super().__init__("rvol_spike", interval_sec or 30)
+        self.min_rvol = float(os.getenv("ALERT_MIN_RVOL", "5.0"))
+
+    async def run_once(self, symbol: str) -> Optional[dict]:
+        sig = compute_signals(symbol)
+        rvol = sig.get("rvol_vs_recent") or 0.0
+        if rvol >= self.min_rvol:
+            return {"score": min(10.0, rvol), "label": "rvol_spike",
+                    "details": {"rvol": rvol, "volume_5m": sig.get("volume_5m"),
+                                "best_bid": sig.get("best_bid"), "best_ask": sig.get("best_ask")}}
+        return None
+
+# -------------------------------
+# CVD divergence agent (toy scoring)
+# -------------------------------
+class CvdDivergenceAgent(Agent):
+    def __init__(self, interval_sec: int | None = None):
+        super().__init__("cvd_divergence", interval_sec or 30)
+        self.min_delta = float(os.getenv("ALERT_CVD_DELTA", "75"))
+
+    async def run_once(self, symbol: str) -> Optional[dict]:
         now = time.time()
-
-        # --- windows ---
-        w2  = [r for r in trades[symbol] if r[0] >= now - 120]
-        w5  = [r for r in trades[symbol] if r[0] >= now - 300]
-        w15 = [r for r in trades[symbol] if r[0] >= now - 900]
-
-        def cvd_delta(win) -> float:
+        w5 = [r for r in trades[symbol] if r[0] >= now - 300]
+        def d_cvd(win):
             total = 0.0
             for _, _, sz, sd in win:
-                if sd == "buy":  total += (sz or 0.0)
-                elif sd == "sell": total -= (sz or 0.0)
+                total += (sz or 0.0) if sd == "buy" else (-(sz or 0.0) if sd == "sell" else 0.0)
+            return total
+        d5 = d_cvd(w5)
+        sc = abs(d5) / max(1.0, self.min_delta)
+        if sc >= 1.0:
+            return {"score": min(10.0, 10.0*sc), "label": "cvd_divergence",
+                    "details": {"delta_5m": d5}}
+        return None
+
+# -------------------------------
+# TrendScoreAgent (deterministic posture driver)
+# -------------------------------
+def _tanh(x, s):  # squashing for features
+    try:
+        return math.tanh(x / (s if s != 0 else 1e-9))
+    except Exception:
+        return 0.0
+
+def _sigmoid(z):
+    try:
+        return 1.0 / (1.0 + math.exp(-z))
+    except OverflowError:
+        return 0.0 if z < 0 else 1.0
+
+class TrendScoreAgent(Agent):
+    """
+    Produces p in [0,1] = probability of up-trend over next ~10–15m based on flow + participation + structure.
+    """
+    def __init__(self, interval_sec: int | None = None):
+        super().__init__("trend_score", interval_sec or TS_INTERVAL)
+        self.weights = self._init_weights()
+
+    def _init_weights(self):
+        if TS_WEIGHTS and TS_WEIGHTS.strip().lower() != "default":
+            try:
+                return json.loads(TS_WEIGHTS)
+            except Exception:
+                pass
+        # default weights/prior (flow + structure dominate)
+        return {
+            "bias": 0.0,
+            "w_dcvd2": 0.9,   # ΔCVD 2m
+            "w_dcvd5": 0.6,   # ΔCVD 5m
+            "w_rvol": 0.5,    # (RVOL-1)
+            "w_rvratio": 0.7, # negative weight applied
+            "w_vwap": 0.6,    # price vs vwap (bps)
+            "w_mom1": 0.4,    # 1m mom
+            "w_mom5": 0.4,    # 5m mom
+        }
+
+    async def run_once(self, symbol: str) -> Optional[dict]:
+        now = time.time()
+        buf = trades[symbol]
+        w2  = [r for r in buf if r[0] >= now - 120]
+        w5  = [r for r in buf if r[0] >= now - 300]
+        w15 = [r for r in buf if r[0] >= now - 900]
+
+        def d_cvd(win):
+            total = 0.0
+            for _, _, sz, sd in win:
+                total += (sz or 0.0) if sd == "buy" else (-(sz or 0.0) if sd == "sell" else 0.0)
             return total
 
-        d2, d5 = cvd_delta(w2), cvd_delta(w5)
-        s15 = cvd_delta(w15) / max(1, len(w15))
+        d2 = d_cvd(w2)
+        d5 = d_cvd(w5)
 
-        up_vol = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "buy")
-        dn_vol = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "sell")
-        rvol_ratio = (dn_vol + 1e-9) / (up_vol + 1e-9)
-        push_rvol  = up_vol / max(1e-9, up_vol + dn_vol)
+        # RVOL & ratio
+        vol5 = sum((r[2] or 0.0) for r in w5)
+        recent = (sum((r[2] or 0.0) for r in w15) / 3.0) if w15 else 0.0
+        rvol = vol5 / recent if recent > 0 else 0.0
+
+        up = sum((r[2] or 0.0) for r in w15 if (r[3] or "") == "buy")
+        dn = sum((r[2] or 0.0) for r in w15 if (r[3] or "") == "sell")
+        rvratio = (dn + 1e-9) / (up + 1e-9)
+
+        # momentum
+        mom1_bps = 0.0
+        if w2:
+            p0, p1 = w2[0][1], w2[-1][1]
+            if p0: mom1_bps = (p1 - p0) / p0 * 1e4
 
         mom5_bps = 0.0
         if w5:
             p0, p1 = w5[0][1], w5[-1][1]
             if p0: mom5_bps = (p1 - p0) / p0 * 1e4
 
-        sig = compute_signals(symbol)
-        px = sig.get("best_bid") or sig.get("best_ask")
-        base_low = st.get("base_low", px)
-
-        vwin_min = int(os.getenv("PG_VWAP_MINUTES", "20"))
-        wv = [r for r in trades[symbol] if r[0] >= now - 60*vwin_min]
+        # price vs vwap(20m)
+        vwin = [r for r in buf if r[0] >= now - 20*60]
         vwap = None
-        if wv:
-            num = sum((r[1] or 0.0)*(r[2] or 0.0) for r in wv)
-            den = sum((r[2] or 0.0) for r in wv)
+        if vwin:
+            num = sum((r[1] or 0.0)*(r[2] or 0.0) for r in vwin)
+            den = sum((r[2] or 0.0) for r in vwin)
             vwap = (num/den) if den else None
 
-        # thresholds
-        CVD5    = float(os.getenv("PG_CVD_5M_NEG", "1500"))
-        CVD2    = float(os.getenv("PG_CVD_2M_NEG", "800"))
-        RVR     = float(os.getenv("PG_RVOL_RATIO", "1.2"))
-        PUSHMIN = float(os.getenv("PG_PUSH_RVOL_MIN", "0.7"))
-        MOM5    = float(os.getenv("PG_MOM5_DOWN_BPS", "-8"))
-        MAX_AGE = 60 * float(os.getenv("POSTURE_MAX_AGE_MIN", "30"))
-        PERSIST_K = int(os.getenv("PG_PERSIST_K", "5"))         # K consecutive checks
-        DD_SLOW   = float(os.getenv("PG_DD_SLOW_BPS", "-60"))   # slow drawdown exit (bps)
+        bid, ask = best_px.get(symbol, (None, None))
+        px = ask or bid
+        px_vwap_bps = 0.0
+        if vwap and px:
+            px_vwap_bps = (px - vwap) / vwap * 1e4
 
-        # aging/peak
-        time_in_state   = now - st.get("started_at", now)
-        time_since_peak = now - st.get("peak_ts", st.get("started_at", now))
-        if px and px >= st.get("peak_price", px):
-            st["peak_price"], st["peak_ts"] = px, now
+        # logistic model
+        w = self.weights
+        z = (
+            w["bias"]
+            + w["w_dcvd2"]   * _tanh(d2, 1000)
+            + w["w_dcvd5"]   * _tanh(d5, 2000)
+            + w["w_rvol"]    * _tanh((rvol - 1.0), 0.5)
+            - w["w_rvratio"] * _tanh((rvratio - 1.0), 0.3)
+            + w["w_vwap"]    * _tanh(px_vwap_bps, 12.0)
+            + w["w_mom1"]    * _tanh(mom1_bps, 10.0)
+            + w["w_mom5"]    * _tanh(mom5_bps, 10.0)
+        )
+        p = _sigmoid(z)
+        return {
+            "score": round(p * 10.0, 2),
+            "label": "trend_score",
+            "details": {
+                "p_up": round(p, 4),
+                "features": {
+                    "dcvd_2m": d2, "dcvd_5m": d5, "rvol": rvol,
+                    "rvratio": rvratio, "px_vs_vwap_bps": px_vwap_bps,
+                    "mom1_bps": mom1_bps, "mom5_bps": mom5_bps
+                }
+            }
+        }
 
-        # cues
-        flow_flip = (d5 <= -CVD5) or (d2 <= -CVD2) or (s15 <= 0)
-        rvol_flip = (rvol_ratio >= RVR) or (push_rvol < PUSHMIN)
-        structure_break = ((px is not None and base_low is not None and px < base_low) or
-                           (vwap is not None and px is not None and px < vwap) or
-                           (mom5_bps <= MOM5))
-        aging = (time_in_state > MAX_AGE and time_since_peak > 300)
-
-        # persistence counters
-        pc = self._persist.setdefault(symbol, {"flow":0, "rvol":0, "structure":0})
-        pc["flow"]      = pc["flow"] + 1 if flow_flip else 0
-        pc["rvol"]      = pc["rvol"] + 1 if rvol_flip else 0
-        pc["structure"] = pc["structure"] + 1 if structure_break else 0
-
-        # fast-break (optional, if you added earlier)
-        # ... (keep your existing fast-break here) ...
-
-        # standard 2-of-4 with consecutive check
-        score = int(flow_flip) + int(rvol_flip) + int(structure_break) + int(aging)
-        prev = self._last_score.get(symbol, 0)
-        self._last_score[symbol] = score
-        if score >= 2 and prev >= 2:
-            POSTURE_STATE.pop(symbol, None)
-            return {"score": 8.0, "label": "posture_exit",
-                    "details": {"action":"consider-exit","confidence":0.8,
-                                "reasons":["2-of-4 cues twice"], 
-                                "metrics":{"d2":d2,"d5":d5,"rvol_ratio":rvol_ratio,"mom5_bps":mom5_bps,"vwap":vwap,"px":px,"base_low":base_low}}}
-
-        # NEW: persistence exit — one strong cue kept showing up
-        if pc["structure"] >= PERSIST_K or pc["flow"] >= PERSIST_K:
-            POSTURE_STATE.pop(symbol, None)
-            return {"score": 7.5, "label": "posture_exit",
-                    "details": {"action":"consider-exit","confidence":0.75,
-                                "reasons":[f"Persistent { 'structure' if pc['structure']>=PERSIST_K else 'flow' } weakness"],
-                                "metrics":{"mom5_bps":mom5_bps,"vwap":vwap,"px":px}}}
-
-        # NEW: slow drawdown exit — far off the peak even without huge ΔCVD
-        dd_from_peak_bps = 0.0
-        if px and st.get("peak_price"):
-            dd_from_peak_bps = (px - st["peak_price"]) / st["peak_price"] * 1e4
-        if dd_from_peak_bps <= DD_SLOW and ((vwap and px and px < vwap) or mom5_bps <= MOM5):
-            POSTURE_STATE.pop(symbol, None)
-            return {"score": 7.5, "label": "posture_exit",
-                    "details": {"action":"consider-exit","confidence":0.75,
-                                "reasons":[f"Slow drawdown {dd_from_peak_bps:.0f}bps with weak structure"],
-                                "metrics":{"dd_from_peak_bps":dd_from_peak_bps,"vwap":vwap,"px":px,"mom5_bps":mom5_bps}}}
-
-        return None
-
-
-
-# ---- LLM Analyst Agent -------------------------------------------------------
-from typing import Any, List
-import math
-
-def _agent_map():
-    # Build a fresh name->agent map (handles reloading)
-    return {a.name: a for a in AGENTS}
-
+# -------------------------------
+# LLM Analyst Agent (with recent-tape clamp)
+# -------------------------------
 class LLMAnalystAgent(Agent):
-    """
-    Reads recent signals + findings and produces a structured assessment:
-      - action: "observe" | "prepare" | "consider-entry" | "consider-exit"
-      - confidence: 0..1
-      - rationale: short natural-language explanation
-      - tweaks: [{param, delta, reason}]
-
-    ENV:
-      LLM_ENABLE=true/false
-      OPENAI_API_KEY=...
-      OPENAI_MODEL=gpt-4o-mini (default; falls back to LLM_MODEL)
-      LLM_MODEL= (optional fallback)
-      OPENAI_BASE_URL= (optional, OpenAI-compatible)
-      LLM_MIN_INTERVAL=180
-      LLM_MAX_INPUT_TOKENS=4000
-      LLM_ALERT_MIN_CONF=0.65
-
-      # Proxy controls:
-      # By default, the OpenAI httpx client ignores env proxies (trust_env=False)
-      # Set LLM_USE_PROXY=true to force using HTTP(S)_PROXY explicitly.
-      HTTP_PROXY / HTTPS_PROXY (used only if LLM_USE_PROXY=true)
-      LLM_USE_PROXY=true|false
-    """
-
-    def __init__(self, interval_sec=None):
-        enabled = os.getenv("LLM_ENABLE", "false").lower() == "true"
+    def __init__(self, interval_sec: int | None = None):
         poll = int(os.getenv("LLM_MIN_INTERVAL", "180"))
         super().__init__("llm_analyst", interval_sec or poll)
-        self.post_from_agent = os.getenv("LLM_POST_FROM_AGENT", "false").lower() == "true"
-        self.enabled = enabled
-        # Model selection with fallback; prevents invalid values like "gpt-5" from breaking silently
+        self.enabled = os.getenv("LLM_ENABLE", "true").lower() == "true"
         self.model = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4o-mini"
-        self.base_url = os.getenv("OPENAI_BASE_URL") or None
         self.max_tokens = int(os.getenv("LLM_MAX_INPUT_TOKENS", "4000"))
-        self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.65"))
-        self._last_seen: Dict[str, Tuple[str, float]] = {}  # symbol -> (digest, ts)
-        self._last_seen = {}  # symbol -> (digest, ts)
-
-        # Track why we might be disabled (shown in /health)
         self.disable_reason = None
         self._client = None
 
         api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            self.enabled = False
-            self.disable_reason = "OPENAI_API_KEY env var is missing"
-        elif not self.enabled:
-            # LLM explicitly disabled by env
-            self.disable_reason = "LLM_ENABLE=false"
+        if not api_key or not self.enabled:
+            self.disable_reason = "no_api_key_or_disabled"
         else:
-            # Try to construct the OpenAI client (no invalid 'proxies=' kwarg)
             try:
-                import httpx
                 from openai import OpenAI
-
-                client_kwargs = {"api_key": api_key}
-                if self.base_url:
-                    client_kwargs["base_url"] = self.base_url
-
-                # IMPORTANT:
-                # Never allow ambient env proxies to affect the OpenAI client unless explicitly requested.
-                # This avoids APIConnectionError where GET /models works but POST /chat/completions fails.
+                kwargs = {"api_key": api_key}
+                base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+                if base_url:
+                    kwargs["base_url"] = base_url
                 use_proxy = os.getenv("LLM_USE_PROXY", "false").lower() == "true"
-                proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")                
-
-                if use_proxy and proxy_url:
-                    http_client = httpx.Client(proxy=proxy_url, timeout=30.0, http2=False, trust_env=False)
-                else:
-                    http_client = httpx.Client(timeout=30.0, trust_env=False)
-
-                client_kwargs["http_client"] = http_client
-                self._client = OpenAI(**client_kwargs)
-
-            except ImportError:
-                self.enabled = False
-                self.disable_reason = "OpenAI SDK not installed (add `openai` to requirements.txt)"
+                ignore_proxy = os.getenv("LLM_IGNORE_PROXY", "true").lower() == "true"
+                if use_proxy and not ignore_proxy:
+                    proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+                    if proxy_url:
+                        import httpx as _httpx
+                        kwargs["http_client"] = _httpx.Client(proxy=proxy_url, timeout=30.0)
+                self._client = OpenAI(**kwargs)
             except Exception as e:
-                self.enabled = False
-                self.disable_reason = f"Init error: {e}"
+                self.disable_reason = f"init_error: {e}"
 
-        # tiny memory to reduce duplicate outputs
+        self.alert_min_conf = float(os.getenv("LLM_ALERT_MIN_CONF", "0.60"))
         self._last_hash: Dict[str, str] = {}
 
     async def _gather_context(self, symbol: str) -> dict:
-        # current live signals
         sig = compute_signals(symbol)
-
-        # last 5 mins of mini-stats
         now = time.time()
         window = [r for r in trades[symbol] if r[0] >= now - 300]
         n_tr = len(window)
@@ -475,31 +380,34 @@ class LLMAnalystAgent(Agent):
         price1 = window[-1][1] if n_tr else None
         price_bps = ((price1 - price0) / price0 * 1e4) if (price0 and price0 > 0) else 0.0
 
-        # latest recent findings from DB for this symbol
+        # last findings for symbol
         recent_findings: List[dict] = []
-        if pg_conn is None:
-            await pg_connect()
-        try:
-            with pg_conn.cursor() as cur:
-                cur.execute("""
-                    SELECT ts_utc, agent, score, label, details
-                    FROM findings
-                    WHERE symbol=%s
-                        AND label <> 'llm_error'
-                        AND ts_utc > NOW() - INTERVAL '30 minutes'
-                    ORDER BY ts_utc DESC
-                    LIMIT 50
-                """, (symbol,))
-                for ts, a, sc, lb, det in cur.fetchall():
-                    recent_findings.append({
-                        "ts_utc": str(ts),
-                        "agent": a,
-                        "score": float(sc),
-                        "label": lb,
-                        "details": det
-                    })
-        except Exception:
-            pass
+        if pg_conn:
+            try:
+                with pg_conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT ts_utc, agent, score, label, details
+                        FROM findings WHERE symbol=%s
+                        ORDER BY ts_utc DESC LIMIT 20
+                    """, (symbol,))
+                    for ts, a, sc, lb, det in cur.fetchall():
+                        recent_findings.append({"ts_utc": str(ts), "agent": a, "score": float(sc), "label": lb, "details": det})
+            except Exception:
+                pass
+
+        # extra features for better reasoning
+        # compute ΔCVD(2m) and mom1
+        w2 = [r for r in trades[symbol] if r[0] >= now - 120]
+        def d_cvd(win):
+            total = 0.0
+            for _, _, sz, sd in win:
+                total += (sz or 0.0) if sd == "buy" else (-(sz or 0.0) if sd == "sell" else 0.0)
+            return total
+        d2 = d_cvd(w2)
+        mom1_bps = 0.0
+        if w2:
+            p0, p1 = w2[0][1], w2[-1][1]
+            if p0: mom1_bps = (p1 - p0) / p0 * 1e4
 
         return {
             "symbol": symbol,
@@ -511,375 +419,264 @@ class LLMAnalystAgent(Agent):
                 "best_ask": sig.get("best_ask"),
                 "trades_cached": sig.get("trades_cached"),
                 "price_bps_5m": price_bps,
-                "avg_trade_size_5m": avg_sz,
-                "trades_5m": n_tr,
+                "mom5_bps": sig.get("mom5_bps"),
+                "mom1_bps": mom1_bps,
+                "dcvd_2m": d2,
             },
             "recent_findings": recent_findings,
         }
 
     def _prompt(self, ctx: dict) -> List[dict]:
         sys = (
-            "You are the LLM Analyst Agent for a real-time trading system.\n"
-            "- You DO NOT place trades.\n"
-            "- Base your decision on the current `signals` and any recent NON-error findings only.\n"
-            "- Ignore connectivity/tooling errors (e.g., items labeled `llm_error`) and do NOT mention them.\n"
-            "- If live data is sparse (e.g., volume_5m == 0 and trades_5m == 0), choose 'observe' with low confidence.\n"
-            "Output VALID JSON only."
+            "You are the LLM Analyst Agent for a real-time trading system. "
+            "Decide one of: observe | prepare | consider-entry | consider-exit. "
+            "Prefer caution unless flow (dcvd_2m>0), momentum (mom1_bps>0), RVOL>1.2 and price/structure support it. "
+            "Output strict JSON with {action, confidence, rationale, tweaks}."
         )
-        schema_hint = {
-            "type": "object",
-            "properties": {
-                "action": {"enum": ["observe","prepare","consider-entry","consider-exit"]},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                "rationale": {"type": "string"},
-                "tweaks": {
-                    "type": "array",
-                    "items": {
-                        "oneOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "param": {"type": "string"},
-                                    "delta": {"type": "number"},
-                                    "reason": {"type": "string"}
-                                },
-                                "required": ["param","delta","reason"]
-                            },
-                            {"type": "string"}  # also accept compact "PARAM:+0.1" forms
-                        ]
-                    }
-                }
-            },
-            "required": ["action","confidence","rationale","tweaks"]
-        }
         user = {
             "role": "user",
             "content": (
                 "Context:\n"
-                f"{json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]}\n\n"
-                "Task:\n"
-                "1) Decide action: observe | prepare | consider-entry | consider-exit.\n"
-                "2) Provide a 1-2 sentence rationale in plain language. Do NOT mention tooling or connectivity.\n"
-                "3) Suggest 0-3 parameter tweaks for the Alpha-Optimizer (AOA). Either give\n"
-                "   objects {param, delta, reason} or compact strings like 'ALERT_MIN_RVOL:+0.1'.\n"
-                "Return ONLY JSON: {action, confidence, rationale, tweaks}."
+                + json.dumps(ctx, ensure_ascii=False)[: self.max_tokens * 3]
+                + "\nReturn ONLY JSON."
             )
         }
-        return [
-            {"role": "system", "content": sys},
-            user,
-        ], schema_hint
+        return [{"role": "system", "content": sys}, user]
 
-    async def run_once(self, symbol) -> Optional[dict]:
-        if not self.enabled or self._client is None:
+    async def run_once(self, symbol: str) -> Optional[dict]:
+        if not self._client:
             return None
-    
-        import re, httpx
-    
-        # 1) Build context and defensively drop error findings from it
         ctx = await self._gather_context(symbol)
-        if isinstance(ctx.get("recent_findings"), list):
-            ctx["recent_findings"] = [
-                f for f in ctx["recent_findings"] if str(f.get("label")) != "llm_error"
-            ]
-    
-        msgs, _schema = self._prompt(ctx)
-    
-        # Helper: accept either dict tweaks or "PARAM:+0.1" strings and normalize
-        def _normalize_tweaks(t):
-            out = []
-            if not isinstance(t, list):
-                return out
-            for item in t:
-                if isinstance(item, dict):
-                    param = str(item.get("param") or "").strip()
-                    reason = str(item.get("reason") or "").strip() or "model-suggested"
-                    try:
-                        delta = float(item.get("delta"))
-                    except Exception:
-                        continue
-                    if param:
-                        out.append({"param": param, "delta": delta, "reason": reason})
-                elif isinstance(item, str):
-                    m = re.match(r"\s*([A-Za-z0-9_.:-]+)\s*:\s*([+\-]?\d+(?:\.\d+)?)", item)
-                    if m:
-                        out.append({
-                            "param": m.group(1),
-                            "delta": float(m.group(2)),
-                            "reason": "compact format"
-                        })
-            return out[:5]
-    
+        msgs = self._prompt(ctx)
+
         raw = None
         try:
-            # 2) Call OpenAI in a thread to avoid blocking the loop
-            resp = await asyncio.get_event_loop().run_in_executor(
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
                 None,
                 lambda: self._client.chat.completions.create(
                     model=self.model,
                     messages=msgs,
                     response_format={"type": "json_object"},
-                    temperature=0.2,
-                    max_tokens=600,
+                    temperature=0.2, max_tokens=600,
                 )
             )
             raw = resp.choices[0].message.content or "{}"
-    
-            # 3) Parse + sanitize
             data = json.loads(raw)
+
             action = (data.get("action") or "observe").strip()
-            try:
-                confidence = float(data.get("confidence") or 0.0)
-            except Exception:
-                confidence = 0.0
+            confidence = float(data.get("confidence") or 0.0)
             rationale = str(data.get("rationale") or "").strip()
-            tweaks = _normalize_tweaks(data.get("tweaks") or [])
-    
-            # Clamp confidence + compute score
-            confidence = max(0.0, min(1.0, confidence))
-            score = max(0.0, min(10.0, confidence * 10.0))
-    
+            tweaks = data.get("tweaks") or []
+
+            # Clamp by very-recent tape and TrendScore finding if present
+            now = time.time()
+            w2 = [r for r in trades[symbol] if r[0] >= now - 120]
+            def d_cvd(win):
+                total = 0.0
+                for _, _, sz, sd in win:
+                    total += (sz or 0.0) if sd == "buy" else (-(sz or 0.0) if sd == "sell" else 0.0)
+                return total
+            d2 = d_cvd(w2)
+            mom1_bps = 0.0
+            if w2:
+                p0, p1 = w2[0][1], w2[-1][1]
+                if p0: mom1_bps = (p1 - p0) / p0 * 1e4
+            rvol = compute_signals(symbol).get("rvol_vs_recent") or 0.0
+            entry_min_rvol = float(os.getenv("LLM_ENTRY_MIN_RVOL", "1.20"))
+
+            # also read last trend score if available (from DB)
+            p_up = None
+            if pg_conn:
+                try:
+                    with pg_conn.cursor() as cur:
+                        cur.execute("""
+                          SELECT details->>'p_up' FROM findings
+                          WHERE symbol=%s AND agent='trend_score'
+                          ORDER BY ts_utc DESC LIMIT 1
+                        """, (symbol,))
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            try:
+                                p_up = float(row[0])
+                            except Exception:
+                                p_up = None
+                except Exception:
+                    pass
+
+            if action == "consider-entry":
+                if (d2 < 0) or (mom1_bps <= -8) or (rvol < entry_min_rvol) or (p_up is not None and p_up < 0.55):
+                    action = "observe"; confidence = min(confidence, 0.40)
+
+            if action == "consider-exit":
+                if (d2 > 0 and mom1_bps > 0 and rvol >= 1.0) and (p_up is not None and p_up > 0.55):
+                    action = "observe"; confidence = min(confidence, 0.40)
+
             finding = {
-                "score": score,
+                "score": max(0.0, min(10.0, confidence * 10.0)),
                 "label": "llm_analysis",
                 "details": {
                     "action": action,
                     "confidence": confidence,
                     "rationale": rationale[:600],
-                    "tweaks": tweaks,
+                    "tweaks": tweaks[:5],
                 },
             }
-            
-            import hashlib, time
-            
-            sig_src = json.dumps({
-                "a": action,
-                "c": round(confidence, 2),
-                "r": rationale[:200],
-                "t": [(t.get("param"), float(t.get("delta", 0))) for t in tweaks[:5]],
-            }, sort_keys=True).encode("utf-8")
-            digest = hashlib.sha1(sig_src).hexdigest()
-            last = self._last_seen.get(symbol)
-            now = time.time()
-            if last and last[0] == digest and (now - last[1]) < 90:
-                return None  # suppress duplicate insert/post within 90s
-            self._last_seen[symbol] = (digest, now)
-    
-            # 4) Optional Slack ping from the agent itself (usually keep off;
-            #     let the global poster handle cooldown/dedupe). Requires:
-            #     self.post_from_agent = env LLM_POST_FROM_AGENT=="true"
-            if getattr(self, "post_from_agent", False) and ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
-                txt = (
-                    f"🧠 LLM Analyst | {symbol} | {action} "
-                    f"(conf {confidence:.2f}) — {rationale[:160]}"
-                )
-                try:
-                    await httpx.AsyncClient(timeout=10).post(
-                        ALERT_WEBHOOK_URL, json={"text": txt, "content": txt}
-                    )
-                except Exception:
-                    pass
-    
-            self._last_hash[symbol] = raw[:800]
+
+            # Optional Slack ping (analysis-only mode suppresses raw agent posts)
+            if ALERT_WEBHOOK_URL and not SLACK_ANALYSIS_ONLY and confidence >= self.alert_min_conf:
+                if _should_post(self.name, symbol, finding["score"]):
+                    await _post_webhook({"text": f"🧠 {symbol} {action} ({confidence:.2f}) — {rationale[:160]}"})
 
             return finding
-    
         except Exception as e:
-            err = f"{type(e).__name__}: {str(e)[:180]}"
-            det = {"error": err}
-            if raw:
-                det["raw"] = raw[:400]
-            return {
-                "score": 0.0,
-                "label": "llm_error",
-                "details": det,
-            }
+            det = {"error": f"{type(e).__name__}: {str(e)[:180]}"}
+            if raw: det["raw"] = raw[:300]
+            return {"score": 0.0, "label": "llm_error", "details": det}
 
+# -------------------------------
+# Posture Guard Agent (persistence + slow drawdown)
+# -------------------------------
+POSTURE_STATE: Dict[str, dict] = {}
 
+class PostureGuardAgent(Agent):
+    def __init__(self, interval_sec: int | None = None):
+        super().__init__("posture_guard", interval_sec or POSTURE_GUARD_INTERVAL)
+        self._last_score: dict[str, int] = {}
+        self._persist: dict[str, dict] = {}
 
+    async def run_once(self, symbol: str) -> Optional[dict]:
+        st = POSTURE_STATE.get(symbol)
+        if not st or st.get("state") != "long_bias":
+            self._persist.pop(symbol, None)
+            return None
 
+        now = time.time()
+        buf = trades[symbol]
+        w2  = [r for r in buf if r[0] >= now - 120]
+        w5  = [r for r in buf if r[0] >= now - 300]
+        w15 = [r for r in buf if r[0] >= now - 900]
 
-def _clean_text(s: str) -> str:
-    if not s:
-        return ""
-    # strip HTML and trim
-    s = re.sub(r"<[^>]+>", "", s).strip()
-    return s
+        def d_cvd(win):
+            total = 0.0
+            for _, _, sz, sd in win:
+                total += (sz or 0.0) if sd == "buy" else (-(sz or 0.0) if sd == "sell" else 0.0)
+            return total
+        d2, d5 = d_cvd(w2), d_cvd(w5)
+        s15 = d_cvd(w15) / max(1, len(w15))
 
-async def _post_webhook(payload: dict):
-    if not ALERT_WEBHOOK_URL:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(ALERT_WEBHOOK_URL, json=payload)
-    except Exception:
-        pass
+        up = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "buy")
+        dn = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "sell")
+        rvratio = (dn + 1e-9) / (up + 1e-9)
+        push_rvol = up / max(1e-9, up + dn)
 
-def pg_insert_many(rows):
-    if pg_conn is None or not rows:
-        return
-    try:
-        from psycopg2.extras import execute_values
-        with pg_conn.cursor() as cur:
-            execute_values(
-                cur,
-                "INSERT INTO trades_crypto (symbol, ts_utc, price, size, side) VALUES %s",
-                rows,
-            )
-    except Exception:
-        pass
-def pg_insert_finding(agent, symbol, score, label, details):
-    if pg_conn is None:
-        return
-    try:
-        import json as _json
-        with pg_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO findings (agent, symbol, score, label, details) VALUES (%s,%s,%s,%s,%s)",
-                (agent, symbol, score, label, _json.dumps(details or {})),
-            )
-    except Exception:
-        pass
+        mom5_bps = 0.0
+        if w5:
+            p0, p1 = w5[0][1], w5[-1][1]
+            if p0: mom5_bps = (p1 - p0) / p0 * 1e4
 
-def pg_agent_heartbeat(agent, status="ok", note=None):
-    if pg_conn is None:
-        return
-    try:
-        with pg_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_runs (agent, status, note) VALUES (%s,%s,%s)",
-                (agent, status, note),
-            )
-    except Exception:
-        pass
-        
+        sig = compute_signals(symbol)
+        px = sig.get("best_bid") or sig.get("best_ask")
+        base_low = st.get("base_low", px)
 
+        vwin_min = int(os.getenv("PG_VWAP_MINUTES", "20"))
+        vwin = [r for r in buf if r[0] >= now - 60*vwin_min]
+        vwap = None
+        if vwin:
+            num = sum((r[1] or 0.0)*(r[2] or 0.0) for r in vwin)
+            den = sum((r[2] or 0.0) for r in vwin)
+            vwap = (num/den) if den else None
 
-def _min_score_for(agent_name: str) -> float:
-    if agent_name == "cvd_divergence":
-        return AGENT_ALERT_MIN_SCORE_CVD
-    if agent_name == "rvol_spike":
-        return AGENT_ALERT_MIN_SCORE_RVOL
-    if agent_name == "llm_analyst":
-        # llm_analyst is gated by confidence separately; still keep a floor
-        return 2.0
-    return AGENT_ALERT_MIN_SCORE_DEFAULT
+        CVD5    = float(os.getenv("PG_CVD_5M_NEG", "1500"))
+        CVD2    = float(os.getenv("PG_CVD_2M_NEG", "800"))
+        RVR     = float(os.getenv("PG_RVOL_RATIO", "1.2"))
+        PUSHMIN = float(os.getenv("PG_PUSH_RVOL_MIN", "0.7"))
+        MOM5    = float(os.getenv("PG_MOM5_DOWN_BPS", "-8"))
+        MAX_AGE = 60 * float(os.getenv("POSTURE_MAX_AGE_MIN", "30"))
+        PERSIST_K = int(os.getenv("PG_PERSIST_K", "5"))
+        DD_SLOW   = float(os.getenv("PG_DD_SLOW_BPS", "-60"))
 
-def _should_post(agent_name: str, sym: str, score: float) -> bool:
-    now = time.time()
-    key = (agent_name, sym)
-    if score < _min_score_for(agent_name):
-        return False
-    last = _last_agent_alert_ts.get(key, 0)
-    if now - last < AGENT_ALERT_COOLDOWN_SEC:
-        return False
-    _last_agent_alert_ts[key] = now
-    return True
+        # maintain peak
+        if px and px >= st.get("peak_price", px):
+            st["peak_price"], st["peak_ts"] = px, now
 
-def _fmt_price(x):
-    try: return f"{float(x):,.2f}"
-    except: return str(x)
+        # cues
+        flow_flip = (d5 <= -CVD5) or (d2 <= -CVD2) or (s15 <= 0)
+        rvol_flip = (rvratio >= RVR) or (push_rvol < PUSHMIN)
+        structure_break = ((px is not None and base_low is not None and px < base_low) or
+                           (vwap is not None and px is not None and px < vwap) or
+                           (mom5_bps <= MOM5))
+        time_in_state   = now - st.get("started_at", now)
+        time_since_peak = now - st.get("peak_ts", st.get("started_at", now))
+        aging = (time_in_state > MAX_AGE and time_since_peak > 300)
 
-def _fmt_num(x, fmt="{:.2f}"):
-    try:
-        return fmt.format(float(x))
-    except Exception:
-        return "—"
+        pc = self._persist.setdefault(symbol, {"flow":0, "rvol":0, "structure":0})
+        pc["flow"] = pc["flow"] + 1 if flow_flip else 0
+        pc["rvol"] = pc["rvol"] + 1 if rvol_flip else 0
+        pc["structure"] = pc["structure"] + 1 if structure_break else 0
 
-def _analysis_blocks(sym: str, finding: dict) -> dict:
-    d = finding.get("details") or {}
-    action     = (d.get("action") or "observe").upper()
-    conf       = float(d.get("confidence") or 0.0)
-    rationale  = _clean_text(d.get("rationale") or "")
-    tweaks     = d.get("tweaks") or []
+        score = int(flow_flip) + int(rvol_flip) + int(structure_break) + int(aging)
+        prev = self._last_score.get(symbol, 0)
+        self._last_score[symbol] = score
+        if score >= 2 and prev >= 2:
+            POSTURE_STATE.pop(symbol, None)
+            return {"score": 8.0, "label": "posture_exit",
+                    "details": {"action":"consider-exit","confidence":0.8,
+                                "reasons":["2-of-4 cues twice"],
+                                "metrics":{"d2":d2,"d5":d5,"rvratio":rvratio,"mom5_bps":mom5_bps,"vwap":vwap,"px":px,"base_low":base_low}}}
 
-    tweak_lines = "\n".join(
-        [f"• `{t.get('param')}` Δ {t.get('delta')} — {t.get('reason','')}" for t in tweaks[:4]]
-    ) or "—"
+        if pc["structure"] >= PERSIST_K or pc["flow"] >= PERSIST_K:
+            POSTURE_STATE.pop(symbol, None)
+            return {"score": 7.5, "label": "posture_exit",
+                    "details": {"action":"consider-exit","confidence":0.75,
+                                "reasons":[f"Persistent {'structure' if pc['structure']>=PERSIST_K else 'flow'} weakness"],
+                                "metrics":{"mom5_bps":mom5_bps,"vwap":vwap,"px":px}}}
 
-    # include a quick snapshot
-    sig = compute_signals(sym)
-    snap = f"RVOL { (sig['rvol_vs_recent'] or 0):.2f}x · CVD {sig['cvd']:.0f} · Bid/Ask {_fmt_price(sig['best_bid'])} / {_fmt_price(sig['best_ask'])}"
+        dd_from_peak_bps = 0.0
+        if px and st.get("peak_price"):
+            dd_from_peak_bps = (px - st["peak_price"]) / st["peak_price"] * 1e4
+        if dd_from_peak_bps <= DD_SLOW and ((vwap and px and px < vwap) or mom5_bps <= MOM5):
+            POSTURE_STATE.pop(symbol, None)
+            return {"score": 7.5, "label": "posture_exit",
+                    "details": {"action":"consider-exit","confidence":0.75,
+                                "reasons":[f"Slow drawdown {dd_from_peak_bps:.0f}bps with weak structure"],
+                                "metrics":{"dd_from_peak_bps":dd_from_peak_bps,"vwap":vwap,"px":px,"mom5_bps":mom5_bps}}}
+        return None
 
-    blocks = [
-        {"type":"header","text":{"type":"plain_text","text":f"🧠 LLM Analyst → {action} · {sym}"}},
-        {"type":"context","elements":[{"type":"mrkdwn","text":snap}]},
-        {"type":"section","fields":[
-            {"type":"mrkdwn","text":f"*Score*\n{finding['score']:.2f}"},
-            {"type":"mrkdwn","text":f"*Confidence*\n{conf:.2f}"},
-        ]},
-        {"type":"section","text":{"type":"mrkdwn","text":f"*Rationale*\n{rationale[:400]}"}},
-        {"type":"section","text":{"type":"mrkdwn","text":f"*Tweaks*\n{tweak_lines}"}},
-        {"type":"context","elements":[{"type":"mrkdwn","text":"<https://tradeagent-…ondigitalocean.app|Open dashboard> · auto"}]},
-    ]
-    return {"text": f"LLM: {action} {sym} (conf {conf:.2f})", "blocks": blocks}
+# -------------------------------
+# Agents list & scheduler
+# -------------------------------
+AGENTS: List[Agent] = [
+    RVOLSpikeAgent(),
+    CvdDivergenceAgent(),
+    TrendScoreAgent(),
+    LLMAnalystAgent(),
+    PostureGuardAgent(),
+]
 
-
-def _blocks_for_cvd(sym, finding):
-    d = finding.get("details") or {}
-    return [
-        {"type":"header","text":{"type":"plain_text","text":f"🧊 CVD Divergence • {sym}"}},
-        {"type":"section","fields":[
-            {"type":"mrkdwn","text":f"*Score*: {finding['score']:.2f}"},
-            {"type":"mrkdwn","text":f"*Window*: {d.get('window_sec','—')}s"},
-            {"type":"mrkdwn","text":f"*Price Δ (bps)*: {d.get('price_bps','—'):.2f}"},
-            {"type":"mrkdwn","text":f"*CVD Δ*: {d.get('cvd_delta','—'):.2f}"},
-        ]},
-    ]
-
-def _blocks_for_rvol(sym, finding):
-    d = finding.get("details") or {}
-    return [
-        {"type":"header","text":{"type":"plain_text","text":f"🔥 RVOL Spike • {sym}"}},
-        {"type":"section","fields":[
-            {"type":"mrkdwn","text":f"*Score*: {finding['score']:.2f}"},
-            {"type":"mrkdwn","text":f"*RVOL*: {d.get('rvol','—'):.2f}x"},
-            {"type":"mrkdwn","text":f"*Vol(5m)*: {d.get('volume_5m','—')}"},
-            {"type":"mrkdwn","text":f"*Bid/Ask*: {d.get('best_bid','—')} / {d.get('best_ask','—')}"},
-        ]},
-    ]
-
-def _blocks_for_llm(sym, finding):
-    d = finding.get("details") or {}
-    action = (d.get("action") or "observe").upper()
-    conf   = float(d.get("confidence") or 0.0)
-    rationale = _clean_text(d.get("rationale") or "")[:ALERT_RATIONALE_CHARS]
-    tweaks = d.get("tweaks") or []
-    tweak_lines = "\n".join([f"• `{t.get('param')}` Δ {t.get('delta')} — {t.get('reason','')}" for t in tweaks[:5]])
-    blocks = [
-        {"type":"header","text":{"type":"plain_text","text":f"🧠 LLM Analyst → {action} • {sym}"}},
-        {"type":"section","fields":[
-            {"type":"mrkdwn","text":f"*Score*: {finding['score']:.2f}"},
-            {"type":"mrkdwn","text":f"*Confidence*: {conf:.2f}"},
-        ]},
-        {"type":"section","text":{"type":"mrkdwn","text":f"*Rationale*\n{rationale or '—'}"}},
-    ]
-    if tweak_lines:
-        blocks.append({"type":"section","text":{"type":"mrkdwn","text":f"*Tweak suggestions*\n{tweak_lines}"}})
-    return blocks
+_last_run_ts: Dict[Tuple[str,str], float] = defaultdict(lambda: 0.0)
 
 async def agents_loop():
     while True:
         try:
-            if DB_URL and pg_conn is None:
+            if os.getenv("DATABASE_URL") and pg_conn is None:
                 await pg_connect()
 
             now = time.time()
 
-            # Update posture peak price once per loop per symbol
+            # posture peak tracker
             for sym in SYMBOLS:
                 st = POSTURE_STATE.get(sym)
                 if st and st.get("state") == "long_bias":
                     sig = compute_signals(sym)
                     px = sig.get("best_ask") or sig.get("best_bid")
-                    if px:
-                        st["peak_price"] = max(st.get("peak_price", px), px)
+                    if px and px >= st.get("peak_price", px):
+                        st["peak_price"] = px
+                        st["peak_ts"] = now
 
             for agent in AGENTS:
                 for sym in SYMBOLS:
                     key = (agent.name, sym)
-
-                    # Honor per-agent interval
                     if now - _last_run_ts[key] < max(1, int(getattr(agent, "interval_sec", 10))):
                         continue
 
@@ -887,566 +684,236 @@ async def agents_loop():
                         finding = await agent.run_once(sym)
                         _last_run_ts[key] = time.time()
                         pg_agent_heartbeat(agent.name, "ok")
+
                         if not finding:
                             continue
 
-                        # Gate low-score LLM inserts (reduce noise)
+                        # Persist finding (with LLM floor)
                         if agent.name == "llm_analyst" and float(finding.get("score", 0.0)) < LLM_ANALYST_MIN_SCORE:
                             continue
 
-                        # Persist
-                        pg_insert_finding(
-                            agent.name, sym,
-                            float(finding["score"]),
-                            finding["label"],
-                            finding.get("details") or {}
-                        )
+                        pg_insert_finding(agent.name, sym, float(finding["score"]), finding["label"], finding.get("details") or {})
 
-                        # Maintain posture state based on LLM guidance
-                        if agent.name == "llm_analyst":
-                            det = finding.get("details") or {}
-                            act = (det.get("action") or "").lower()
-                            conf = float(det.get("confidence") or 0.0)
+                        # --- TrendScore drives posture open/close ---
+                        if agent.name == "trend_score":
+                            p_up = float(finding["details"].get("p_up", 0.0))
+                            # persistence across checks per symbol
+                            stc = POSTURE_STATE.get(sym)
+                            ts_buf = stc.get("_tsbuf", []) if stc else []
+                            # maintain simple deque by ourselves
+                            pass
 
-                            if act == "consider-entry" and conf >= POSTURE_ENTRY_CONF:
-                                sig = compute_signals(sym)
-                                px = sig.get("best_ask") or sig.get("best_bid")
-                                # Use last 5m low as base; fallback to current price
-                                now2 = time.time()
-                                win = [r for r in trades[sym] if r[0] >= now2 - 300]
-                                base_low = min((r[1] for r in win), default=px or 0.0) or px
-                                POSTURE_STATE[sym] = {
-                                    "state": "long_bias",
-                                    "started_at": now2,
-                                    "entry_price": px,
-                                    "base_low": base_low,
-                                    "peak_price": px,
-                                }
-                            elif act == "consider-exit" and POSTURE_STATE.get(sym, {}).get("state") == "long_bias":
-                                POSTURE_STATE.pop(sym, None)
-
-                        # Optional Slack posting (kept conservative)
-                        if ALERT_WEBHOOK_URL and not SLACK_ANALYSIS_ONLY:
-                            if agent.name == "llm_analyst":
-                                det = finding.get("details") or {}
-                                conf = float(det.get("confidence") or 0.0)
-                                if conf >= LLM_ALERT_MIN_CONF and _should_post(agent.name, sym, float(finding["score"])):
-                                    await _post_webhook(_analysis_blocks(sym, finding))
+                        # Gating posture with TrendScore (without complex state)
+                        if agent.name == "trend_score":
+                            p_up = float(finding["details"].get("p_up", 0.0))
+                            ps = POSTURE_STATE.get(sym, {})
+                            cnt = ps.get("_persist", 0)
+                            if p_up >= TS_ENTRY:
+                                cnt = max(1, cnt + 1) if ps.get("state") == "long_bias" else (cnt + 1)
+                                if cnt >= TS_PERSIST and ps.get("state") != "long_bias":
+                                    sig = compute_signals(sym)
+                                    px = sig.get("best_ask") or sig.get("best_bid")
+                                    now2 = time.time()
+                                    w5 = [r for r in trades[sym] if r[0] >= now2 - 300]
+                                    base_low = min((r[1] for r in w5), default=px or 0.0) or px
+                                    POSTURE_STATE[sym] = {
+                                        "state": "long_bias",
+                                        "started_at": now2,
+                                        "entry_price": px,
+                                        "base_low": base_low,
+                                        "peak_price": px,
+                                        "peak_ts": now2,
+                                        "_persist": 0,
+                                    }
+                                else:
+                                    ps["_persist"] = cnt
+                                    POSTURE_STATE[sym] = ps or {"_persist": cnt}
+                            elif p_up <= TS_EXIT and ps.get("state") == "long_bias":
+                                cnt = ps.get("_persist", 0) + 1
+                                if cnt >= TS_PERSIST:
+                                    POSTURE_STATE.pop(sym, None)
+                                else:
+                                    ps["_persist"] = cnt
+                                    POSTURE_STATE[sym] = ps
                             else:
-                                if ALERT_VERBOSE and _should_post(agent.name, sym, float(finding["score"])):
-                                    if agent.name == "cvd_divergence":
-                                        await _post_webhook({"text": f"CVD divergence {sym}", "blocks": _blocks_for_cvd(sym, finding)})
-                                    elif agent.name == "rvol_spike":
-                                        await _post_webhook({"text": f"RVOL spike {sym}", "blocks": _blocks_for_rvol(sym, finding)})
+                                # decay persistence
+                                if ps:
+                                    ps["_persist"] = max(0, ps.get("_persist", 0) - 1)
+                                    POSTURE_STATE[sym] = ps
+
+                        # Optional Slack for raw agents if not analysis-only
+                        if ALERT_WEBHOOK_URL and not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE:
+                            if _should_post(agent.name, sym, float(finding["score"])):
+                                await _post_webhook({"text": f"{agent.name} {sym} → {finding['label']} {finding['score']:.1f}"})
 
                     except Exception:
                         pg_agent_heartbeat(agent.name, "error")
-                        # Optionally log the exception here
-                        pass
-
+                        continue
         except Exception:
-            # Optionally log the outer exception here
             pass
 
         await asyncio.sleep(5)
 
-async def digest_loop():
-    interval = int(os.getenv("ALERT_SUMMARY_INTERVAL","0") or "0")
-    if interval <= 0 or not ALERT_WEBHOOK_URL:
-        return
-    while True:
-        try:
-            rows = []
-            if pg_conn is None:
-                await pg_connect()
-            with pg_conn.cursor() as cur:
-                cur.execute("""
-                    SELECT ts_utc, agent, symbol, score, label
-                    FROM findings
-                    WHERE ts_utc > NOW() - INTERVAL '10 minutes'
-                    ORDER BY score DESC
-                    LIMIT 6
-                """)
-                rows = cur.fetchall()
+# -------------------------------
+# FastAPI app & endpoints
+# -------------------------------
+app = FastAPI()
 
-            if rows:
-                lines = [f"• *{s}* — {a} `{lb}` (score {float(sc):.2f})" for _,a,s,sc,lb in rows]
-                await _post_webhook({"text":"Summary",
-                    "blocks":[
-                        {"type":"header","text":{"type":"plain_text","text":"🧾 10-minute Summary"}},
-                        {"type":"section","text":{"type":"mrkdwn","text":"\n".join(lines)}}
-                    ]})
-        except Exception:
-            pass
-        await asyncio.sleep(interval)
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(agents_loop())
 
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return "<h3>Opportunity Radar (Alpha)</h3><p>See <a href='/signals'>/signals</a>, <a href='/findings'>/findings</a>, <a href='/health'>/health</a></p>"
 
+@app.get("/signals")
+async def signals(symbol: str = Query(default=SYMBOLS[0])):
+    sig = compute_signals(symbol)
+    sig["symbol"] = symbol
+    return sig
+
+@app.get("/findings")
+async def findings(symbol: Optional[str] = None, limit: int = 50):
+    if pg_conn is None:
+        return {"findings": []}
+    q = """
+      SELECT ts_utc, agent, symbol, score, label, details
+      FROM findings
+    """
+    params = []
+    if symbol:
+        q += " WHERE symbol=%s"
+        params.append(symbol)
+    q += " ORDER BY ts_utc DESC LIMIT %s"
+    params.append(limit)
+    out = []
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(q, params)
+            for ts, a, sym, sc, lb, det in cur.fetchall():
+                out.append({"ts_utc": str(ts), "agent": a, "symbol": sym, "score": float(sc), "label": lb, "details": det})
+    except Exception:
+        pass
+    return {"findings": out}
+
+@app.get("/agents")
+async def agents():
+    if pg_conn is None:
+        return {"agents": []}
+    out = []
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute("""
+              SELECT agent, MAX(ts_utc) FROM agent_runs GROUP BY agent
+            """)
+            for a, ts in cur.fetchall():
+                out.append({"agent": a, "last_run": str(ts)})
+    except Exception:
+        pass
+    return {"agents": out}
 
 @app.post("/agents/run-now")
-async def run_now(
-    symbol: str = Query("BTC-USD"),
-    names: Optional[str] = Query(None),
-    agent: Optional[str] = Query(None),
-    insert: bool = Query(True),
-    post_slack: bool = Query(False),
-):
-    # accept either ?names=a,b or ?agent=a
+async def run_now(names: Optional[str] = None, agent: Optional[str] = None, symbol: str = Query(default=SYMBOLS[0]), insert: bool = True):
+    lookup = {a.name: a for a in AGENTS}
     chosen = []
     if names:
-        chosen = [n.strip() for n in names.split(",") if n.strip()]
-    elif agent:
-        chosen = [agent.strip()]
-
-    m = {a.name: a for a in AGENTS}
-    if not chosen:
-        chosen = list(m.keys())
-
-    wanted = [n for n in chosen if n in m]
-    if not wanted:
-        return {"ok": False, "error": "no agents matched", "available": list(m.keys())}
+        for n in [x.strip() for x in names.split(",")]:
+            if n in lookup: chosen.append(lookup[n])
+    elif agent and agent in lookup:
+        chosen.append(lookup[agent])
+    else:
+        chosen = AGENTS
 
     results = []
-    for nm in wanted:
-        ag = m[nm]
+    for a in chosen:
         try:
-            # CALL THE RIGHT METHOD HERE:
-            finding = await ag.run_once(symbol)
-
-            # heartbeat + optional insert
-            pg_agent_heartbeat(ag.name, "manual")
-            if finding and insert:
-                pg_insert_finding(ag.name, symbol, finding["score"], finding["label"], finding.get("details") or {})
-
-            # optional Slack when manually testing
-            if finding and post_slack and ALERT_WEBHOOK_URL:
-                if ag.name == "llm_analyst":
-                    conf = float((finding.get("details") or {}).get("confidence") or 0)
-                    if conf >= LLM_ALERT_MIN_CONF:
-                        await _post_webhook(_analysis_blocks(symbol, finding))
-                elif not SLACK_ANALYSIS_ONLY and ALERT_VERBOSE:
-                    await _post_webhook({"text": f"🤖 {ag.name} | {symbol} | {finding['label']} | score={finding['score']:.2f}"})
-
-            results.append({"agent": ag.name, "finding": finding})
+            f = await a.run_once(symbol)
+            if f and insert:
+                pg_insert_finding(a.name, symbol, float(f["score"]), f["label"], f.get("details") or {})
+            results.append({"agent": a.name, "finding": f})
+        except NotImplementedError as e:
+            results.append({"agent": a.name, "error": f"NotImplementedError: {e}"})
         except Exception as e:
-            results.append({"agent": ag.name, "error": f"{type(e).__name__}: {e}"})
-
-    return {"ok": True, "ran": wanted, "results": results}
-
-
-
-@app.post("/agents/test-llm")
-async def test_llm(
-    symbol: str = Query("BTC-USD"),
-    insert: bool = Query(False, description="insert the generated analysis into DB"),
-    post_slack: bool = Query(False, description="post Slack if conf >= threshold"),
-):
-    llm = _agent_map().get("llm_analyst")
-    if not llm or not getattr(llm, "enabled", False) or llm._client is None:
-        return {"ok": False, "reason": "llm_analyst not enabled/ready"}
-
-    # Gather live context but call OpenAI directly (no internal Slack, no duplicates)
-    ctx = await llm._gather_context(symbol)
-    msgs, _schema = llm._prompt(ctx)
-
-    try:
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: llm._client.chat.completions.create(
-                model=llm.model,
-                messages=msgs,
-                response_format={"type": "json_object"},
-                temperature=0.2,
-                max_tokens=600,
-            )
-        )
-        raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
-        action = (data.get("action") or "observe").strip()
-        confidence = float(data.get("confidence") or 0.0)
-        rationale = str(data.get("rationale") or "").strip()
-        tweaks = data.get("tweaks") or []
-
-        finding = {
-            "agent": "llm_analyst",
-            "symbol": symbol,
-            "score": max(0.0, min(10.0, confidence * 10.0)),
-            "label": "llm_analysis",
-            "details": {
-                "action": action,
-                "confidence": confidence,
-                "rationale": rationale[:600],
-                "tweaks": tweaks[:5],
-            },
-        }
-
-        if insert:
-            pg_insert_finding("llm_analyst", symbol, finding["score"], finding["label"], finding["details"])
-
-        if post_slack and ALERT_WEBHOOK_URL and confidence >= LLM_ALERT_MIN_CONF:
-            await _post_webhook(_analysis_blocks(symbol, finding))
-
-        return {"ok": True, "finding": finding}
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-@app.get("/llm/netcheck")
-async def llm_netcheck():
-    import httpx, os
-    base = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(base + "/models",
-                            headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"})
-        return {"ok": r.status_code < 500, "status": r.status_code, "base": base, "snippet": (r.text or "")[:200]}
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "base": base}
-
-@app.get("/test-alert")
-async def test_alert():
-    url = os.getenv("ALERT_WEBHOOK_URL")
-    if not url:
-        return {"ok": False, "reason": "ALERT_WEBHOOK_URL not set"}
-    msg = {"text": "✅ Test alert from Opportunity Radar", "content": "✅ Test alert from Opportunity Radar"}
-    try:
-        await httpx.AsyncClient(timeout=10).post(url, json=msg)
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+            results.append({"agent": a.name, "error": f"{type(e).__name__}: {e}"})
+    return {"ok": True, "ran": [a.name for a in chosen], "results": results}
 
 @app.get("/health")
 async def health():
-    agent_status = {}
-
-    # Try to pull last heartbeat times (optional; ignore if DB missing)
-    last_runs = {}
-    try:
-        if DB_URL and pg_conn is None:
-            await pg_connect()
-        if pg_conn:
+    # agent last_run
+    agents = {}
+    if pg_conn:
+        try:
             with pg_conn.cursor() as cur:
-                cur.execute("""
-                    SELECT agent, max(ts_utc) AS last_run
-                    FROM agent_runs
-                    GROUP BY agent
-                """)
-                for a, t in cur.fetchall():
-                    last_runs[a] = str(t)
-    except Exception:
-        pass
-
-    for agent in AGENTS:
-        # Default structure
-        info = {"status": "ok"}
-        # If agent has an "enabled" flag, reflect it
-        if hasattr(agent, "enabled") and not getattr(agent, "enabled"):
-            info["status"] = "disabled"
-            info["reason"] = getattr(agent, "disable_reason", "unknown")
-        # Add last run if we have it
-        if agent.name in last_runs:
-            info["last_run"] = last_runs[agent.name]
-        agent_status[agent.name] = info
-
+                cur.execute("""SELECT agent, MAX(ts_utc) FROM agent_runs GROUP BY agent""")
+                for a, ts in cur.fetchall():
+                    agents[a] = {"status": "ok", "last_run": str(ts)}
+        except Exception:
+            pass
     return {
         "status": "ok",
         "symbols": SYMBOLS,
         "trades_cached": {s: len(trades[s]) for s in SYMBOLS},
-        "agents": agent_status
+        "agents": agents
     }
-
 
 @app.get("/db-health")
 async def db_health():
-    if DB_URL is None:
-        return {"db": "not-configured"}
-    ok = False
     try:
-        if pg_conn is None:
-            await pg_connect()
         if pg_conn:
             with pg_conn.cursor() as cur:
-                cur.execute("SELECT 1;")
+                cur.execute("SELECT NOW()")
                 cur.fetchone()
-                ok = True
-    except Exception:
-        ok = False
-    return {"db": "ok" if ok else "error"}
+            return {"ok": True}
+        return {"ok": False, "error": "no_connection"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
-def compute_signals(sym: str):
-    now = time.time()
-    cutoff = now - RV_SECS
-    vol_5m = sum(sz for ts, _, sz, _ in trades[sym] if ts >= cutoff)
-    baseline = sorted(hist_5m[sym])
-    med = baseline[len(baseline)//2] if baseline else 0.0
-    rvol = (vol_5m / med) if med > 0 else None
-    return {
-        "symbol": sym,
-        "cvd": cvd[sym],
-        "volume_5m": vol_5m,
-        "rvol_vs_recent": rvol,
-        "best_bid": best_bid[sym],
-        "best_ask": best_ask[sym],
-        "trades_cached": len(trades[sym]),
-        "timestamp": now
-    }
-
-@app.get("/signals")
-async def signals(symbol: str = Query(None)):
-    sym = symbol or SYMBOLS[0]
-    return JSONResponse(compute_signals(sym))
-
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    template = env.get_template("index.html")
-    return template.render(symbols=SYMBOLS)
-
-@app.get("/agents")
-async def agents_status():
-    # latest run per agent
+@app.get("/export-csv")
+async def export_csv(symbol: str = Query(default=SYMBOLS[0]), limit: int = 500):
     if pg_conn is None:
-        await pg_connect()
-    rows = []
+        return PlainTextResponse("no db", status_code=503)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["ts_utc","agent","symbol","score","label","details"])
     try:
         with pg_conn.cursor() as cur:
             cur.execute("""
-                SELECT agent, max(ts_utc) AS last_run
-                FROM agent_runs
-                GROUP BY agent
-                ORDER BY agent
-            """)
-            rows = cur.fetchall()
+              SELECT ts_utc, agent, symbol, score, label, details
+              FROM findings WHERE symbol=%s ORDER BY ts_utc DESC LIMIT %s
+            """, (symbol, limit))
+            for row in cur.fetchall():
+                writer.writerow([row[0], row[1], row[2], row[3], row[4], json.dumps(row[5])])
     except Exception:
         pass
-    return {"agents": [{"agent": a, "last_run": str(t)} for a,t in rows]}
+    out.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="findings_{symbol}.csv"'}
+    return StreamingResponse(iter([out.read()]), media_type="text/csv", headers=headers)
 
-@app.get("/findings")
-async def get_findings(symbol: Optional[str]=None, agent: Optional[str]=None, limit: int=50):
-    if pg_conn is None:
-        await pg_connect()
-    result = []
-    try:
-        q = "SELECT ts_utc, agent, symbol, score, label, details FROM findings"
-        cond, vals = [], []
-        if symbol:
-            cond.append("symbol=%s"); vals.append(symbol)
-        if agent:
-            cond.append("agent=%s"); vals.append(agent)
-        if cond:
-            q += " WHERE " + " AND ".join(cond)
-        q += " ORDER BY ts_utc DESC LIMIT %s"; vals.append(max(1, min(limit, 200)))
-        with pg_conn.cursor() as cur:
-            cur.execute(q, vals)
-            for ts, a, s, sc, lb, det in cur.fetchall():
-                result.append({
-                    "ts_utc": str(ts), "agent": a, "symbol": s,
-                    "score": float(sc), "label": lb, "details": det
-                })
-    except Exception:
-        pass
-    return {"findings": result}
-
-@app.get("/export-csv")
-async def export_csv(symbol: str = Query(None), n: int = 2000):
-    sym = symbol or SYMBOLS[0]
-    n = max(1, min(n, len(trades[sym])))
-    output = io.StringIO()
-    w = csv.writer(output)
-    w.writerow(["ts_epoch","price","size","side"])
-    for row in list(trades[sym])[-n:]:
-        w.writerow(row)
-    output.seek(0)
-    return StreamingResponse(output, media_type="text/csv",
-                             headers={"Content-Disposition": f"attachment; filename={sym}-trades.csv"})
-
-async def coinbase_ws(sym: str):
-    """One websocket consumer per symbol."""
-    while True:
-        try:
-            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
-                await ws.send(json.dumps({"type":"subscribe","product_ids":[sym],"channels":["matches","ticker"]}))
-                last_period = int(time.time() // RV_SECS)
-                async for raw in ws:
-                    msg = json.loads(raw)
-
-                    if msg.get("type") == "match":
-                        ts = time.time()
-                        size = float(msg.get("size", 0) or 0.0)
-                        side = msg.get("side")
-                        price = float(msg.get("price", 0) or 0.0)
-                        trades[sym].append((ts, price, size, side))
-                        if side == "buy":
-                            cvd[sym] += size
-                        elif side == "sell":
-                            cvd[sym] -= size
-                        if DB_URL:
-                            db_buffer[sym].append((sym, time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ts)), price, size, side))
-
-                        # roll 5-min baseline
-                        period = int(ts // RV_SECS)
-                        if period != last_period:
-                            cutoff = ts - RV_SECS
-                            vol = sum(s for t,_,s,_ in trades[sym] if t >= cutoff)
-                            hist_5m[sym].append(vol)
-                            last_period = period
-
-                    elif msg.get("type") == "ticker":
-                        try:
-                            if msg.get("best_bid") is not None:
-                                best_bid[sym] = float(msg["best_bid"])
-                            if msg.get("best_ask") is not None:
-                                best_ask[sym] = float(msg["best_ask"])
-                        except Exception:
-                            pass
-        except Exception:
-            await asyncio.sleep(2)
-
-async def db_flush_loop():
-    while True:
-        try:
-            if DB_URL and pg_conn is None:
-                await pg_connect()
-            if DB_URL and pg_conn:
-                # flush up to 1000 rows per symbol
-                for sym in SYMBOLS:
-                    batch = []
-                    while db_buffer[sym] and len(batch) < 1000:
-                        batch.append(db_buffer[sym].popleft())
-                    if batch:
-                        pg_insert_many(batch)
-        except Exception:
-            pass
-        await asyncio.sleep(3)
-
-async def alert_loop():
-    """Simple alert: RVOL spike OR fast CVD change."""
+@app.get("/test-alert")
+async def test_alert():
     if not ALERT_WEBHOOK_URL:
-        return  # alerts disabled
-    import httpx
-    last_cvd_sample: Dict[str, Tuple[float,float]] = {}  # sym -> (ts, cvd)
+        return {"ok": False, "error": "no webhook"}
+    await _post_webhook({"text": "✅ Opportunity Radar webhook test"})
+    return {"ok": True}
 
-    while True:
-        try:
-            now = time.time()
-            for sym in SYMBOLS:
-                sig = compute_signals(sym)
-                rv = sig["rvol_vs_recent"] or 0.0
-
-                # CVD delta over ~5m
-                prev = last_cvd_sample.get(sym)
-                cvd_delta = 0.0
-                if prev and now - prev[0] >= RV_SECS:
-                    cvd_delta = abs(sig["cvd"] - prev[1])
-                    last_cvd_sample[sym] = (now, sig["cvd"])
-                elif not prev:
-                    last_cvd_sample[sym] = (now, sig["cvd"])
-
-                should_alert = (rv >= ALERT_MIN_RVOL) or (cvd_delta >= ALERT_CVD_DELTA)
-                if should_alert and (now - last_alert_ts[sym] >= ALERT_COOLDOWN_SEC):
-                    text = f"🔔 {sym} | RVOL: {rv:.2f}x | CVDΔ(5m): {cvd_delta:.2f} | Bid/Ask: {sig['best_bid']} / {sig['best_ask']}"
-                    try:
-                        # Slack & Discord both accept simple JSON webhooks
-                        await httpx.AsyncClient(timeout=10).post(ALERT_WEBHOOK_URL, json={"text": text, "content": text})
-                        last_alert_ts[sym] = now
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        await asyncio.sleep(10)
-
-# simple mirror so we have both paths available
-@app.post("/llm/selftest")
-@app.post("/agents/llm-selftest")
-async def llm_selftest(symbol: str = Query("BTC-USD")):
-    # find the LLM agent
-    llm = next((a for a in AGENTS if getattr(a, "name", "") == "llm_analyst"), None)
-    if not llm or not llm.enabled or llm._client is None:
-        return {"ok": False, "reason": "llm_analyst not enabled/ready"}
-
-    # minimal context (keeps it fast & deterministic)
-    ctx = {
-        "symbol": symbol,
-        "signals": {"cvd": 1.23, "volume_5m": 2.34, "rvol_vs_recent": 1.1,
-                    "best_bid": 100.0, "best_ask": 100.1, "trades_cached": 42,
-                    "price_bps_5m": 5.0, "avg_trade_size_5m": 0.01, "trades_5m": 20},
-        "recent_findings": []
-    }
-    msgs, _ = llm._prompt(ctx)
-
+# --- LLM netcheck endpoints (simple) ---
+@app.get("/llm/netcheck")
+async def llm_netcheck():
+    base = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    # We don't actually call models here to avoid secrets exposure
     try:
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: llm._client.chat.completions.create(
-                model=llm.model,
-                messages=msgs,
-                response_format={"type": "json_object"},
-                temperature=0.0,
-                max_tokens=200,
-            )
-        )
-        raw = resp.choices[0].message.content
-        return {"ok": True, "raw": raw}
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(base + "/models", headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY','')}" })
+            snip = r.text[:300]
+            return {"ok": r.status_code < 500, "status": r.status_code, "base": base, "snippet": snip}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "error": str(e), "base": base}
 
-@app.post("/llm/httpx-probe")
-async def llm_httpx_probe(model: str = Query("gpt-4o-mini")):
-    import os, httpx, json
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return {"ok": False, "error": "no OPENAI_API_KEY"}
-    # Force no env proxies, no HTTP/2 weirdness
-    async with httpx.AsyncClient(timeout=20, http2=False, trust_env=False) as c:
-        try:
-            r = await c.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": "Say 'pong' as JSON"}],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0,
-                    "max_tokens": 20,
-                },
-            )
-            return {"ok": r.status_code < 400, "status": r.status_code, "body": (r.text or "")[:400]}
-        except Exception as e:
-            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-@app.get("/llm/config")
-async def llm_config():
-    # Peek at what the running process actually sees
-    return {
-        "OPENAI_MODEL": os.getenv("OPENAI_MODEL"),
-        "LLM_MODEL": os.getenv("LLM_MODEL"),
-        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL"),
-        "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
-        "HTTP_PROXY": os.getenv("HTTP_PROXY"),
-        "LLM_USE_PROXY": os.getenv("LLM_USE_PROXY"),
-        "LLM_ENABLE": os.getenv("LLM_ENABLE"),
-    }
-_last_run_ts: Dict[Tuple[str, str], float] = defaultdict(float)
-# --- register agents (after class definitions) ---
-AGENTS = [
-    RVOLSpikeAgent(),
-    CVDDivergenceAgent(),
-    MacroWatcher(),
-    LLMAnalystAgent(),
-    PostureGuardAgent(),     # <— new
-]
-
-
-@app.on_event("startup")
-async def startup_event():
-    os.makedirs(TEMPLATE_DIR, exist_ok=True)
-    for sym in SYMBOLS:
-        asyncio.create_task(coinbase_ws(sym))
-    asyncio.create_task(db_flush_loop())
-     # asyncio.create_task(alert_loop())  # <- comment out OR gate it:
-    if not SLACK_ANALYSIS_ONLY:
-        asyncio.create_task(alert_loop())
-    asyncio.create_task(agents_loop())
-
-
-    
+@app.post("/agents/test-llm")
+async def test_llm(symbol: str = Query(default=SYMBOLS[0])):
+    agent = next((a for a in AGENTS if a.name == "llm_analyst"), None)
+    if not agent:
+        return {"ok": False, "error": "llm agent missing"}
+    f = await agent.run_once(symbol)
+    return {"ok": True if f else False, "raw": json.dumps(f.get("details") if f else {})}
