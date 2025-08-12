@@ -1,159 +1,136 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8">
   <title>Opportunity Radar (Alpha)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; }
-    .grid { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(220px,1fr)); }
-    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04);}
-    .label { color:#6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;}
-    .value { font-size: 20px; font-weight: 700; margin-top: 6px; }
-    .row { display:flex; gap:12px; align-items:center; margin-bottom: 16px; }
-    .pill { display:inline-flex; align-items:center; gap:8px; font-size:12px; padding:4px 8px; border-radius:999px; }
-    .ok { background:#e8faf0; color:#107a3d; }
-    .warn { background:#fff5e5; color:#92400e; }
-    .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; color: #111;}
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 16px; }
+    .card { border: 1px solid #eee; border-radius: 10px; padding: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+    h1 { margin: 0 0 16px 0; }
+    h2 { margin: 8px 0; font-size: 16px; color: #444; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .ok { color: #0a9b4c; font-weight: 600; }
+    .stale { color: #b97b00; font-weight: 600; }
+    .err { color: #b00020; font-weight: 600; }
+    .small { color: #555; font-size: 12px; }
+    .findings { height: 380px; overflow: auto; border: 1px solid #eee; border-radius: 10px; padding: 8px; }
+    .muted { color: #777; }
+    @media (max-width: 1100px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <div class="row">
-    <h1 style="margin:0;">Opportunity Radar (Alpha)</h1>
-    <select id="symbol"></select>
-  </div>
-
+  <h1>Opportunity Radar (Alpha) <select id="symbol"></select></h1>
   <div class="grid">
-    <div class="card"><div class="label">Cumulative Volume Delta (CVD)</div><div id="cvd" class="value">—</div></div>
-    <div class="card"><div class="label">5-min Volume</div><div id="vol" class="value">—</div><div>RVOL vs recent: <span id="rvol">—</span></div></div>
-    <div class="card"><div class="label">Best Bid / Ask</div><div class="value"><span id="bid">—</span> / <span id="ask">—</span></div></div>
-    <div class="card"><div class="label">Trades Cached</div><div id="cached" class="value">—</div></div>
-  </div>
-
-  <div style="margin-top:24px;">
-    <h3>Latest Findings</h3>
-    <div id="findings" class="card" style="max-height:300px; overflow:auto;"></div>
-  </div>
-
-  <!-- Agent Health -->
-  <div style="margin-top:24px;">
-    <h3>Agent Health</h3>
-    <div id="agents" class="grid"></div>
-    <div class="label" style="margin-top:8px;">
-      Status = OK if the agent has reported in within the last 2 minutes.
+    <div class="card">
+      <h2>Cumulative Volume Delta (CVD)</h2>
+      <div class="mono" id="cvd">—</div>
+    </div>
+    <div class="card">
+      <h2>5-min Volume</h2>
+      <div class="mono" id="vol">—</div>
+      <div class="small muted">RVOL vs recent: <span id="rvol">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Best Bid / Ask</h2>
+      <div class="mono"><span id="bid">—</span> / <span id="ask">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Trades Cached</h2>
+      <div class="mono" id="tc">—</div>
     </div>
   </div>
 
-  <div style="margin-top:12px;">
-    API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a> · Agents: <a href="/agents">/agents</a>
-  </div>
+  <h2>Latest Findings</h2>
+  <div class="findings mono" id="findings">loading…</div>
 
-  <script>
-    // --- utils -------------------------------------------------
-    const nf = (opts={}) => new Intl.NumberFormat('en-US', opts);
-    const fmt = (n, opts) => (Number.isFinite(+n) ? nf(opts).format(+n) : '—');
-    const fmt2 = n => fmt(n, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const fmt4 = n => fmt(n, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  <h2>Agent Health</h2>
+  <div class="grid" id="health"></div>
 
-    function timeAgo(iso) {
-      const t = new Date(iso).getTime();
-      if (!t) return '—';
-      const s = Math.floor((Date.now() - t) / 1000);
-      if (s < 60) return `${s}s ago`;
-      const m = Math.floor(s/60); if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m/60); return `${h}h ${m%60}m ago`;
-    }
+  <p class="small muted">API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a> · Agents: <a href="/agents">/agents</a></p>
 
-    function renderFinding(f){
-  const base = `<b>${f.agent}</b> · <code>${f.label}</code> · score ${fmt2(f.score)}
-                <div style="color:#555;">${f.ts_utc}</div>`;
-  if (f.label === 'llm_analysis' && f.details) {
-    const d = f.details || {};
-    const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
-      ? `<ul style="margin:6px 0 0 20px;">
-           ${d.tweaks.map(t=>`<li><code>${t.param}</code>: Δ ${t.delta} — ${t.reason}</li>`).join('')}
-         </ul>` : '';
-    return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
-      ${base}
-      <div>Action: <b>${(d.action||'observe')}</b> (conf ${fmt2(d.confidence)})</div>
-      <div style="color:#333;">${String(d.rationale||'').replace(/</g,'&lt;')}</div>
-      ${tweaks}
-    </div>`;
-  }
-  if (f.label === 'llm_error' && f.details) {
-    const err = (f.details.error || '').replace(/</g,'&lt;');
-    return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
-      ${base}
-      <div style="color:#b91c1c;">LLM Error: ${err}</div>
-    </div>`;
-  }
-  return `<div style="padding:6px 0; border-bottom:1px solid #eee;">${base}</div>`;
+<script>
+const symSel = document.getElementById('symbol');
+let SYMBOLS = [];
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  return r.json();
 }
 
-    async function loadFindings() {
-      const sym = document.getElementById('symbol').value;
-      const res = await fetch(`/findings?symbol=${encodeURIComponent(sym)}&limit=20`).then(r=>r.json());
-      const box = document.getElementById('findings');
-      const arr = res.findings || [];
-      box.innerHTML = arr.length ? arr.map(renderFinding).join('') : '—';
-    }
+async function loadSymbols() {
+  const h = await fetchJSON('/health');
+  SYMBOLS = h.symbols || ["BTC-USD"];
+  SYMBOLS.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s; opt.textContent = s;
+    symSel.appendChild(opt);
+  });
+}
 
-    async function loadAgents() {
-      try {
-        const res = await fetch('/agents').then(r=>r.json());
-        const box = document.getElementById('agents');
-        const items = res.agents || [];
-        const now = Date.now();
-        box.innerHTML = items.map(a => {
-          const last = new Date(a.last_run).getTime();
-          const fresh = last && (now - last) <= 120_000; // 2 minutes
-          const klass = fresh ? 'pill ok' : 'pill warn';
-          const label = fresh ? 'OK' : 'STALE';
-          return `<div class="card">
-            <div class="label">Agent</div>
-            <div class="value" style="margin-bottom:8px;">${a.agent}</div>
-            <div><span class="${klass}"><span class="dot"></span>${label}</span></div>
-            <div style="margin-top:8px;">Last run: ${a.last_run ? timeAgo(a.last_run) : '—'}</div>
-          </div>`;
-        }).join('') || '<div class="card">No agent heartbeats yet.</div>';
-      } catch (_) {
-        document.getElementById('agents').innerHTML = '<div class="card">Unable to load agent status.</div>';
+async function refresh() {
+  const symbol = symSel.value || SYMBOLS[0];
+
+  const sig = await fetchJSON('/signals?symbol=' + encodeURIComponent(symbol));
+  document.getElementById('cvd').textContent = (sig.cvd ?? '—').toLocaleString(undefined, {maximumFractionDigits: 4});
+  document.getElementById('vol').textContent = (sig.volume_5m ?? '—').toLocaleString();
+  document.getElementById('rvol').textContent = (sig.rvol_vs_recent ?? 0).toFixed(2) + 'x';
+  document.getElementById('bid').textContent = sig.best_bid ?? '—';
+  document.getElementById('ask').textContent = sig.best_ask ?? '—';
+  document.getElementById('tc').textContent = sig.trades_cached ?? '—';
+
+  const f = await fetchJSON('/findings?symbol=' + encodeURIComponent(symbol) + '&limit=80');
+  const el = document.getElementById('findings');
+  el.innerHTML = '';
+  (f.findings || []).forEach(it => {
+    const div = document.createElement('div');
+    let head = `${it.agent} · ${it.label} · score ${Number(it.score).toFixed(2)}\n${it.ts_utc}`;
+    let det = '';
+    try {
+      const d = it.details || {};
+      if (it.agent === 'llm_analyst') {
+        det = `\nAction: ${d.action} (conf ${(d.confidence ?? 0).toFixed(2)})\n${d.rationale || ''}`;
+        const t = d.tweaks || [];
+        if (t.length) det += '\n• tweaks: ' + JSON.stringify(t);
+      } else if (it.agent === 'trend_score') {
+        det = `\np_up: ${(d.p_up*100).toFixed(1)}%`;
+      } else if (it.agent === 'rvol_spike') {
+        det = `\nRVOL: ${((d.rvol)||0).toFixed(2)}x`;
+      } else if (it.agent === 'cvd_divergence') {
+        det = `\nΔCVD(5m): ${d.delta_5m}`;
+      } else if (it.agent === 'posture_guard') {
+        det = `\nAction: ${d.action} — ${ (d.reasons||[]).join('; ') }`;
       }
-    }
+    } catch(e){}
+    div.textContent = head + det + '\n';
+    el.appendChild(div);
+  });
 
-    async function poll(force=false) {
-      const sym = document.getElementById('symbol').value;
-      const res = await fetch(`/signals?symbol=${encodeURIComponent(sym)}`).then(r=>r.json());
+  const hl = await fetchJSON('/health');
+  const hg = document.getElementById('health');
+  hg.innerHTML = '';
+  const now = Date.now();
+  (Object.entries(hl.agents || {})).forEach(([name, obj]) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const ts = new Date(obj.last_run).getTime();
+    const age = (now - ts)/1000;
+    const statusCls = age <= 120 ? 'ok' : 'stale';
+    card.innerHTML = `<h2>${name}</h2><div class="${statusCls}">${statusCls.toUpperCase()}</div><div class="small muted">Last run: ${obj.last_run}</div>`;
+    hg.appendChild(card);
+  });
+}
 
-      // number formatting with commas
-      document.getElementById('cvd').textContent     = fmt4(res.cvd);
-      document.getElementById('vol').textContent     = fmt2(res.volume_5m);
-      document.getElementById('rvol').textContent    = Number.isFinite(+res.rvol_vs_recent) ? `${fmt2(res.rvol_vs_recent)}x` : '—';
-      document.getElementById('bid').textContent     = fmt2(res.best_bid);
-      document.getElementById('ask').textContent     = fmt2(res.best_ask);
-      document.getElementById('cached').textContent  = fmt(res.trades_cached, { maximumFractionDigits: 0 });
-
-      if (!force) loadFindings();
-      setTimeout(poll, 1500);
-    }
-
-    async function init() {
-      const h = await fetch('/health').then(r=>r.json());
-      const sel = document.getElementById('symbol');
-      (h.symbols || []).forEach(s => {
-        const o = document.createElement('option');
-        o.value = s; o.textContent = s; sel.appendChild(o);
-      });
-      sel.value = (h.symbols && h.symbols[0]) || 'BTC-USD';
-
-      loadFindings();
-      loadAgents();
-      poll();
-      sel.addEventListener('change', ()=> poll(true));
-      setInterval(loadAgents, 15_000); // refresh agent cards every 15s
-    }
-
-    init();
-  </script>
+(async () => {
+  await loadSymbols();
+  symSel.value = SYMBOLS[0];
+  await refresh();
+  setInterval(refresh, 4000);
+  symSel.addEventListener('change', refresh);
+})();
+</script>
 </body>
 </html>
