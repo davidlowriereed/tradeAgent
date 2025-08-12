@@ -1,136 +1,232 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Opportunity Radar (Alpha)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; color: #111;}
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 16px; }
-    .card { border: 1px solid #eee; border-radius: 10px; padding: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-    h1 { margin: 0 0 16px 0; }
-    h2 { margin: 8px 0; font-size: 16px; color: #444; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .ok { color: #0a9b4c; font-weight: 600; }
-    .stale { color: #b97b00; font-weight: 600; }
-    .err { color: #b00020; font-weight: 600; }
-    .small { color: #555; font-size: 12px; }
-    .findings { height: 380px; overflow: auto; border: 1px solid #eee; border-radius: 10px; padding: 8px; }
-    .muted { color: #777; }
-    @media (max-width: 1100px) { .grid { grid-template-columns: repeat(2, 1fr); } }
-    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    :root{
+      --bg:#0f1115; --card:#171a21; --muted:#98a2b3; --text:#e5e7eb; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --accent:#60a5fa;
+      --chip:#202532; --chipText:#cbd5e1;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Helvetica Neue',Noto Sans,sans-serif}
+    a{color:var(--accent);text-decoration:none}
+    .wrap{max-width:1180px;margin:22px auto;padding:0 16px}
+    header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+    h1{margin:0;font-size:26px}
+    select{background:#0d1117;border:1px solid #2b3243;color:var(--text);padding:8px 10px;border-radius:10px}
+    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+    .tile{background:var(--card);padding:14px;border-radius:14px;border:1px solid #22283a;min-height:72px}
+    .tile h4{margin:0 0 6px 0;color:#cbd5e1;font-size:12px;text-transform:uppercase;letter-spacing:0.05em}
+    .big{font-size:22px}
+    .muted{color:var(--muted)}
+    .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+    .cards{background:var(--card);border:1px solid #22283a;border-radius:14px;padding:8px;max-height:460px;overflow:auto}
+    .card{border-bottom:1px solid #22283a;padding:12px 8px}
+    .card:last-child{border-bottom:0}
+    .hdr{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+    .badge{padding:4px 8px;border-radius:999px;font-size:11px;background:var(--chip);color:var(--chipText);border:1px solid #2b344a}
+    .badge.green{background:rgba(34,197,94,.1);color:#86efac;border-color:#14532d}
+    .badge.red{background:rgba(239,68,68,.08);color:#fca5a5;border-color:#7f1d1d}
+    .badge.blue{background:rgba(96,165,250,.10);color:#bfdbfe;border-color:#1e3a8a}
+    .badge.yellow{background:rgba(245,158,11,.10);color:#fde68a;border-color:#7c2d12}
+    .score{font-weight:600;font-variant-numeric:tabular-nums}
+    ul.tweaks{margin:6px 0 0 0;padding-left:16px}
+    .small{font-size:12px}
+    .health{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px}
+    .chip-dot{display:inline-flex;align-items:center;gap:6px}
+    .dot{width:8px;height:8px;border-radius:50%}
+    .ok{background:var(--ok)} .stale{background:var(--warn)} .err{background:var(--err)}
+    .right{margin-left:auto}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+    .kbd{font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:var(--chip);padding:2px 6px;border-radius:6px;border:1px solid #2b344a}
+    .sp{height:10px}
   </style>
 </head>
 <body>
-  <h1>Opportunity Radar (Alpha) <select id="symbol"></select></h1>
-  <div class="grid">
-    <div class="card">
-      <h2>Cumulative Volume Delta (CVD)</h2>
-      <div class="mono" id="cvd">—</div>
+  <div class="wrap">
+    <header>
+      <h1>Opportunity Radar (Alpha)</h1>
+      <select id="symbolSel"></select>
+      <span class="muted small">API: <a href="/signals">/signals</a> • <a href="/findings">/findings</a> • <a href="/health">/health</a></span>
+    </header>
+
+    <div class="grid">
+      <div class="tile"><h4>Cumulative Volume Delta (CVD)</h4><div id="cvd" class="big mono">–</div></div>
+      <div class="tile"><h4>5-min Volume</h4><div class="row"><div id="vol" class="big mono">–</div><span id="rvol" class="badge">RVOL vs recent: –</span></div></div>
+      <div class="tile"><h4>Best Bid / Ask</h4><div id="ba" class="big mono">– / –</div></div>
+      <div class="tile"><h4>Trades Cached</h4><div id="tc" class="big mono">–</div></div>
     </div>
-    <div class="card">
-      <h2>5-min Volume</h2>
-      <div class="mono" id="vol">—</div>
-      <div class="small muted">RVOL vs recent: <span id="rvol">—</span></div>
-    </div>
-    <div class="card">
-      <h2>Best Bid / Ask</h2>
-      <div class="mono"><span id="bid">—</span> / <span id="ask">—</span></div>
-    </div>
-    <div class="card">
-      <h2>Trades Cached</h2>
-      <div class="mono" id="tc">—</div>
-    </div>
+
+    <div class="sp"></div>
+    <h3>Latest Findings</h3>
+    <div id="findings" class="cards"></div>
+
+    <div class="sp"></div>
+    <h3>Agent Health</h3>
+    <div id="health" class="health"></div>
   </div>
 
-  <h2>Latest Findings</h2>
-  <div class="findings mono" id="findings">loading…</div>
-
-  <h2>Agent Health</h2>
-  <div class="grid" id="health"></div>
-
-  <p class="small muted">API: <a href="/signals">/signals</a> · Health: <a href="/health">/health</a> · Agents: <a href="/agents">/agents</a></p>
-
 <script>
-const symSel = document.getElementById('symbol');
-let SYMBOLS = [];
+const $ = (id) => document.getElementById(id);
+const fmt = (n, d=2) => (n===null||n===undefined||Number.isNaN(+n)) ? "–" : (+n).toFixed(d);
+const ago = (iso) => {
+  if(!iso) return "–";
+  const t = new Date(iso).getTime();
+  const s = Math.max(0, (Date.now()-t)/1000|0);
+  if(s<60) return s+"s ago";
+  const m = s/60|0; if(m<60) return m+"m ago";
+  const h = m/60|0; return h+"h ago";
+};
 
-async function fetchJSON(url) {
-  const r = await fetch(url);
-  return r.json();
+function actionBadge(action){
+  const span = document.createElement("span");
+  span.className = "badge";
+  span.textContent = action;
+  if(action==="consider-entry") span.classList.add("green");
+  else if(action==="consider-exit") span.classList.add("red");
+  else if(action==="prepare") span.classList.add("blue");
+  else span.classList.add("yellow"); // observe
+  return span;
 }
 
-async function loadSymbols() {
-  const h = await fetchJSON('/health');
-  SYMBOLS = h.symbols || ["BTC-USD"];
-  SYMBOLS.forEach(s => {
-    const opt = document.createElement('option');
-    opt.value = s; opt.textContent = s;
-    symSel.appendChild(opt);
-  });
+function renderFindingCard(f){
+  const card = document.createElement("div");
+  card.className = "card";
+  const hdr = document.createElement("div");
+  hdr.className = "hdr";
+
+  const title = document.createElement("div");
+  title.innerHTML = `<span class="badge">${f.agent}</span> <span class="muted">·</span> <span class="badge">${f.label}</span> <span class="muted">·</span> <span class="score">score ${fmt(f.score,2)}</span>`;
+  hdr.appendChild(title);
+
+  const time = document.createElement("span");
+  time.className="muted small right";
+  time.textContent = new Date(f.ts_utc || Date.now()).toISOString().replace("T"," ").replace("Z","");
+  hdr.appendChild(time);
+
+  card.appendChild(hdr);
+
+  // agent-specific details
+  const d = f.details || {};
+  if(f.agent === "llm_analyst"){
+    const row = document.createElement("div");
+    row.className = "row small";
+    row.appendChild(actionBadge(d.action || "observe"));
+    const conf = document.createElement("span");
+    conf.className="badge";
+    conf.textContent = `confidence ${fmt((d.confidence||0)*100,0)}%`;
+    row.appendChild(conf);
+    card.appendChild(row);
+
+    if(d.rationale){
+      const p = document.createElement("div");
+      p.style.marginTop="6px";
+      p.textContent = d.rationale.length>280 ? d.rationale.slice(0,280)+"…" : d.rationale;
+      card.appendChild(p);
+    }
+    if(Array.isArray(d.tweaks) && d.tweaks.length){
+      const ul = document.createElement("ul"); ul.className="tweaks small";
+      d.tweaks.slice(0,5).forEach(tw=>{
+        let text = "";
+        if(typeof tw==="string"){ text = tw; }
+        else{
+          const p = tw.param||"";
+          const delta = (tw.delta!==undefined)? (tw.delta>0?`+${tw.delta}`:`${tw.delta}`):"";
+          const r = tw.reason?` — ${tw.reason}`:"";
+          text = `${p}: ${delta}${r}`;
+        }
+        const li = document.createElement("li"); li.textContent=text; ul.appendChild(li);
+      });
+      card.appendChild(ul);
+    }
+  } else if(f.agent === "trend_score"){
+    const pUp = d.p_up!==undefined? Math.round(d.p_up*10000)/100 : (d.p_up_pct || 0);
+    const row = document.createElement("div");
+    row.className="row small";
+    const b = document.createElement("span"); b.className="badge blue"; b.textContent = `p_up: ${pUp}%`; row.appendChild(b);
+    const sc = document.createElement("span"); sc.className="badge"; sc.textContent = `components: ΔCVD2 ${fmt(d.dcvd2||0,2)}, RVOL ${fmt(d.rvol||0,2)}, mom1 ${fmt(d.mom1_bps||0,0)}bps`; row.appendChild(sc);
+    card.appendChild(row);
+  } else if(f.agent === "rvol_spike"){
+    const row = document.createElement("div"); row.className="row small";
+    row.innerHTML = `<span class="badge blue">RVOL ${fmt(d.rvol,2)}</span> <span class="badge">Vol5m ${fmt(d.volume_5m,2)}</span> <span class="badge">Bid/Ask ${fmt(d.best_bid,2)} / ${fmt(d.best_ask,2)}</span>`;
+    card.appendChild(row);
+  } else if(f.agent === "cvd_divergence"){
+    const row = document.createElement("div"); row.className="row small";
+    row.innerHTML = `<span class="badge ${ (d.delta_bps||0)>=0 ? 'green':'red' }">ΔCVD ${fmt(d.delta_bps||0,0)} bps</span>`;
+    card.appendChild(row);
+  } else if(f.agent === "posture_guard"){
+    const row = document.createElement("div"); row.className="row small";
+    row.innerHTML = `<span class="badge">${d.state||'neutral'}</span> <span class="badge">reason: ${d.reason||'—'}</span>`;
+    card.appendChild(row);
+  } else {
+    // fallback — short pretty JSON
+    const pre = document.createElement("pre");
+    pre.className="small mono"; pre.textContent = JSON.stringify(d, null, 2);
+    card.appendChild(pre);
+  }
+
+  return card;
 }
 
-async function refresh() {
-  const symbol = symSel.value || SYMBOLS[0];
-
-  const sig = await fetchJSON('/signals?symbol=' + encodeURIComponent(symbol));
-  document.getElementById('cvd').textContent = (sig.cvd ?? '—').toLocaleString(undefined, {maximumFractionDigits: 4});
-  document.getElementById('vol').textContent = (sig.volume_5m ?? '—').toLocaleString();
-  document.getElementById('rvol').textContent = (sig.rvol_vs_recent ?? 0).toFixed(2) + 'x';
-  document.getElementById('bid').textContent = sig.best_bid ?? '—';
-  document.getElementById('ask').textContent = sig.best_ask ?? '—';
-  document.getElementById('tc').textContent = sig.trades_cached ?? '—';
-
-  const f = await fetchJSON('/findings?symbol=' + encodeURIComponent(symbol) + '&limit=80');
-  const el = document.getElementById('findings');
-  el.innerHTML = '';
-  (f.findings || []).forEach(it => {
-    const div = document.createElement('div');
-    let head = `${it.agent} · ${it.label} · score ${Number(it.score).toFixed(2)}\n${it.ts_utc}`;
-    let det = '';
-    try {
-      const d = it.details || {};
-      if (it.agent === 'llm_analyst') {
-        det = `\nAction: ${d.action} (conf ${(d.confidence ?? 0).toFixed(2)})\n${d.rationale || ''}`;
-        const t = d.tweaks || [];
-        if (t.length) det += '\n• tweaks: ' + JSON.stringify(t);
-      } else if (it.agent === 'trend_score') {
-        det = `\np_up: ${(d.p_up*100).toFixed(1)}%`;
-      } else if (it.agent === 'rvol_spike') {
-        det = `\nRVOL: ${((d.rvol)||0).toFixed(2)}x`;
-      } else if (it.agent === 'cvd_divergence') {
-        det = `\nΔCVD(5m): ${d.delta_5m}`;
-      } else if (it.agent === 'posture_guard') {
-        det = `\nAction: ${d.action} — ${ (d.reasons||[]).join('; ') }`;
-      }
-    } catch(e){}
-    div.textContent = head + det + '\n';
-    el.appendChild(div);
-  });
-
-  const hl = await fetchJSON('/health');
-  const hg = document.getElementById('health');
-  hg.innerHTML = '';
-  const now = Date.now();
-  (Object.entries(hl.agents || {})).forEach(([name, obj]) => {
-    const card = document.createElement('div');
-    card.className = 'card';
-    const ts = new Date(obj.last_run).getTime();
-    const age = (now - ts)/1000;
-    const statusCls = age <= 120 ? 'ok' : 'stale';
-    card.innerHTML = `<h2>${name}</h2><div class="${statusCls}">${statusCls.toUpperCase()}</div><div class="small muted">Last run: ${obj.last_run}</div>`;
-    hg.appendChild(card);
-  });
+async function fetchSignals(symbol){
+  const r = await fetch(`/signals?symbol=${encodeURIComponent(symbol)}`);
+  const s = await r.json();
+  $("cvd").textContent = fmt(s.cvd,4);
+  $("vol").textContent = fmt(s.volume_5m,2);
+  $("rvol").textContent = `RVOL vs recent: ${s.rvol_vs_recent===null?'0.00x':fmt(s.rvol_vs_recent,2)+'x'}`;
+  $("ba").textContent = `${fmt(s.best_bid,2)} / ${fmt(s.best_ask,2)}`;
+  $("tc").textContent = s.trades_cached ?? "–";
 }
 
-(async () => {
-  await loadSymbols();
-  symSel.value = SYMBOLS[0];
-  await refresh();
-  setInterval(refresh, 4000);
-  symSel.addEventListener('change', refresh);
-})();
+async function fetchFindings(symbol){
+  const r = await fetch(`/findings?symbol=${encodeURIComponent(symbol)}&limit=40`);
+  const data = await r.json();
+  const box = $("findings"); box.innerHTML = "";
+  (data.findings||[]).forEach(f => box.appendChild(renderFindingCard(f)));
+}
+
+async function fetchHealth(){
+  const r = await fetch("/health"); const h = await r.json();
+  const box = $("health"); box.innerHTML="";
+  const agents = h.agents || {};
+  for(const [name, obj] of Object.entries(agents)){
+    const tile = document.createElement("div"); tile.className="tile";
+    const up = (obj.status||"").toLowerCase();
+    const dot = `<span class="dot ${up==='ok'?'ok':(up==='stale'?'stale':'err')}"></span>`;
+    tile.innerHTML = `<h4>${name}</h4><div class="chip-dot">${dot}<span>${up.toUpperCase()}</span></div><div class="small muted">Last run: ${ago(obj.last_run)}</div>`;
+    box.appendChild(tile);
+  }
+  // Populate symbols in selector if provided
+  if(Array.isArray(h.symbols)){
+    const sel = $("symbolSel");
+    const current = sel.value || "BTC-USD";
+    sel.innerHTML = "";
+    h.symbols.forEach(sym => {
+      const opt = document.createElement("option"); opt.value=sym; opt.textContent=sym;
+      sel.appendChild(opt);
+    });
+    if(h.symbols.includes(current)) sel.value = current;
+  }
+}
+
+async function boot(){
+  await fetchHealth();
+  const sel = $("symbolSel");
+  const symbol = sel.value || (sel.options[0]?.value) || "BTC-USD";
+  await fetchSignals(symbol);
+  await fetchFindings(symbol);
+  sel.addEventListener("change", async (e)=>{
+    await fetchSignals(sel.value);
+    await fetchFindings(sel.value);
+  });
+  // poll
+  setInterval(()=>fetchSignals(sel.value), 5000);
+  setInterval(()=>fetchFindings(sel.value), 8000);
+  setInterval(fetchHealth, 15000);
+}
+boot();
 </script>
 </body>
 </html>
