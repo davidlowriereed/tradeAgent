@@ -822,10 +822,21 @@ async def agents_loop():
                 await pg_connect()
 
             now = time.time()
+
+            # Update posture peak price once per loop per symbol
+            for sym in SYMBOLS:
+                st = POSTURE_STATE.get(sym)
+                if st and st.get("state") == "long_bias":
+                    sig = compute_signals(sym)
+                    px = sig.get("best_ask") or sig.get("best_bid")
+                    if px:
+                        st["peak_price"] = max(st.get("peak_price", px), px)
+
             for agent in AGENTS:
                 for sym in SYMBOLS:
                     key = (agent.name, sym)
-                    # honor each agent’s interval_sec (default from its ctor/env)
+
+                    # Honor per-agent interval
                     if now - _last_run_ts[key] < max(1, int(getattr(agent, "interval_sec", 10))):
                         continue
 
@@ -836,21 +847,65 @@ async def agents_loop():
                         if not finding:
                             continue
 
-                        # optional LLM floor (see #3)
-                        if agent.name == "llm_analyst" and finding["score"] < LLM_ANALYST_MIN_SCORE:
+                        # Gate low-score LLM inserts (reduce noise)
+                        if agent.name == "llm_analyst" and float(finding.get("score", 0.0)) < LLM_ANALYST_MIN_SCORE:
                             continue
 
-                        pg_insert_finding(agent.name, sym, finding["score"], finding["label"], finding["details"])
+                        # Persist
+                        pg_insert_finding(
+                            agent.name, sym,
+                            float(finding["score"]),
+                            finding["label"],
+                            finding.get("details") or {}
+                        )
 
-                        # your existing Slack policy block here…
+                        # Maintain posture state based on LLM guidance
+                        if agent.name == "llm_analyst":
+                            det = finding.get("details") or {}
+                            act = (det.get("action") or "").lower()
+                            conf = float(det.get("confidence") or 0.0)
+
+                            if act == "consider-entry" and conf >= POSTURE_ENTRY_CONF:
+                                sig = compute_signals(sym)
+                                px = sig.get("best_ask") or sig.get("best_bid")
+                                # Use last 5m low as base; fallback to current price
+                                now2 = time.time()
+                                win = [r for r in trades[sym] if r[0] >= now2 - 300]
+                                base_low = min((r[1] for r in win), default=px or 0.0) or px
+                                POSTURE_STATE[sym] = {
+                                    "state": "long_bias",
+                                    "started_at": now2,
+                                    "entry_price": px,
+                                    "base_low": base_low,
+                                    "peak_price": px,
+                                }
+                            elif act == "consider-exit" and POSTURE_STATE.get(sym, {}).get("state") == "long_bias":
+                                POSTURE_STATE.pop(sym, None)
+
+                        # Optional Slack posting (kept conservative)
+                        if ALERT_WEBHOOK_URL and not SLACK_ANALYSIS_ONLY:
+                            if agent.name == "llm_analyst":
+                                det = finding.get("details") or {}
+                                conf = float(det.get("confidence") or 0.0)
+                                if conf >= LLM_ALERT_MIN_CONF and _should_post(agent.name, sym, float(finding["score"])):
+                                    await _post_webhook(_analysis_blocks(sym, finding))
+                            else:
+                                if ALERT_VERBOSE and _should_post(agent.name, sym, float(finding["score"])):
+                                    if agent.name == "cvd_divergence":
+                                        await _post_webhook({"text": f"CVD divergence {sym}", "blocks": _blocks_for_cvd(sym, finding)})
+                                    elif agent.name == "rvol_spike":
+                                        await _post_webhook({"text": f"RVOL spike {sym}", "blocks": _blocks_for_rvol(sym, finding)})
+
                     except Exception:
                         pg_agent_heartbeat(agent.name, "error")
-                        # (optional) log/print the exception
+                        # Optionally log the exception here
+                        pass
+
         except Exception:
-            # (optional) log/print the exception
+            # Optionally log the outer exception here
             pass
 
-        await asyncio.sleep(5)  # keep your base tick
+        await asyncio.sleep(5)
 
 async def digest_loop():
     interval = int(os.getenv("ALERT_SUMMARY_INTERVAL","0") or "0")
