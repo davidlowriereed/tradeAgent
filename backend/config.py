@@ -24,6 +24,12 @@ LLM_ANALYST_MIN_SCORE = float(os.getenv("LLM_ANALYST_MIN_SCORE", "3.0"))
 LLM_USE_PROXY = os.getenv("LLM_USE_PROXY", "false").lower() == "true"
 LLM_IGNORE_PROXY = os.getenv("LLM_IGNORE_PROXY", "true").lower() == "true"
 
+#Macro watcher
+MACRO_WINDOWS=12:30,14:00
+MACRO_WINDOW_MINUTES=10
+MACRO_RVOL_MIN=1.3
+MACRO_INTERVAL_SEC=60
+
 # Agents thresholds
 ALERT_MIN_RVOL = float(os.getenv("ALERT_MIN_RVOL", "5.0"))
 ALERT_CVD_DELTA = float(os.getenv("ALERT_CVD_DELTA", "75"))
