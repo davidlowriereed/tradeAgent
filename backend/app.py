@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
 from .config import SYMBOLS
 from .signals import compute_signals
 from .db import connect_async, fetch_findings, list_agents_last_run, pg_conn
-from .services.market import market_loop
+from backend.services.market import market_loop
 from .scheduler import agents_loop, AGENTS
 
 app = FastAPI()
