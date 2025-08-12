@@ -252,79 +252,138 @@ class RVOLSpikeAgent(Agent):
         return None
 
 class PostureGuardAgent(Agent):
-    def __init__(self, interval_sec=None):
-        super().__init__("posture_guard", interval_sec or 60)
-        self._last_score = {}  # symbol -> last score
+    """
+    Watches an active long-bias posture and calls for exit when momentum fades.
 
-    async def run_once(self, symbol):
+    Fires a `posture_exit` finding when **2 of 4** cues are true on **two consecutive checks**:
+      1) Flow flip: ΔCVD(5m) <= -PG_CVD_5M_NEG OR ΔCVD(2m) <= -PG_CVD_2M_NEG OR 15m CVD slope <= 0
+      2) RVOL stall/flip: red/green RVOL ratio >= PG_RVOL_RATIO OR push_rvol < PG_PUSH_RVOL_MIN
+      3) Structure/VWAP: lose base_low OR price < VWAP( PG_VWAP_MINUTES ) OR 5m momentum <= PG_MOM5_DOWN_BPS (bps)
+      4) Aging: posture older than POSTURE_MAX_AGE_MIN with no new high in the last 5 min
+    """
+
+    def __init__(self, interval_sec: int | None = None):
+        super().__init__("posture_guard", interval_sec or 60)
+        self._last_score: dict[str, int] = {}  # symbol -> last score (for consecutive-check smoothing)
+
+    async def run_once(self, symbol: str) -> Optional[dict]:
         st = POSTURE_STATE.get(symbol)
         if not st or st.get("state") != "long_bias":
-            return None  # only guard when long bias is active
+            return None
 
         now = time.time()
-        # --- compute flow over last 5/15 min directly from trades buffer ---
-        window5 = [r for r in trades[symbol] if r[0] >= now - 300]
-        window15 = [r for r in trades[symbol] if r[0] >= now - 900]
 
-        def cvd_delta(win):
-            # r = (ts, price, size, side) where side=+1 buy, -1 sell (assumed)
-            # adapt if your tuple differs
-            try:
-                return sum((w[2] or 0.0) * (w[3] or 0.0) for w in win)
-            except Exception:
-                return 0.0
+        # --- windows over raw trades buffer ---
+        w2  = [r for r in trades[symbol] if r[0] >= now - 120]   # last 2 minutes
+        w5  = [r for r in trades[symbol] if r[0] >= now - 300]   # last 5 minutes
+        w15 = [r for r in trades[symbol] if r[0] >= now - 900]   # last 15 minutes
 
-        d5 = cvd_delta(window5)
-        # rough slope proxy: 15m delta / 15m duration
-        slope15 = cvd_delta(window15) / max(1, len(window15))
+        def cvd_delta(win) -> float:
+            # trades tuple assumed: (ts, price, size, side) where side is "buy"/"sell"
+            total = 0.0
+            for _, _, sz, sd in win:
+                if sd == "buy":
+                    total += (sz or 0.0)
+                elif sd == "sell":
+                    total -= (sz or 0.0)
+            return total
 
-        # --- RVOL balance: compare med RVOL of red vs green bars (approx) ---
-        # proxy: volume on down-ticks vs up-ticks
-        up_vol = sum((w[2] or 0.0) for w in window15 if (w[3] or 0) > 0)
-        dn_vol = sum((w[2] or 0.0) for w in window15 if (w[3] or 0) < 0)
-        rvol_ratio = (dn_vol + 1e-9) / (up_vol + 1e-9)  # >1 favors selling
+        d2  = cvd_delta(w2)
+        d5  = cvd_delta(w5)
+        # crude slope proxy: signed delta / count (robust to flat periods)
+        s15 = cvd_delta(w15) / max(1, len(w15))
 
-        sig = compute_signals(symbol)
-        px = sig.get("best_bid") or sig.get("best_ask")
-        base_low = st.get("base_low", px)
+        # RVOL balance proxies using uptick/downtick volume
+        up_vol = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "buy")
+        dn_vol = sum((w[2] or 0.0) for w in w15 if (w[3] or "") == "sell")
+        rvol_ratio = (dn_vol + 1e-9) / (up_vol + 1e-9)  # >1 means red (sell) volume dominating
+
+        # push vs pullback share (0..1) — simple fraction of up volume
+        push_rvol = up_vol / max(1e-9, up_vol + dn_vol)
+
+        # 5m momentum in bps
         mom5_bps = 0.0
-        if window5:
-            p0, p1 = window5[0][1], window5[-1][1]
+        if w5:
+            p0, p1 = w5[0][1], w5[-1][1]
             if p0:
                 mom5_bps = (p1 - p0) / p0 * 1e4
 
-        # --- thresholds (tweak per symbol) ---
-        CVD_FLIP = float(os.getenv("PG_CVD_5M_NEG", "2000"))  # negative by this much = flow flip
-        RVOL_RED_OVER_GREEN = float(os.getenv("PG_RVOL_RATIO", "1.2"))
-        MOM5_DOWN = float(os.getenv("PG_MOM5_DOWN_BPS", "-10"))
+        # current price + base/VWAP
+        sig = compute_signals(symbol)
+        px = sig.get("best_bid") or sig.get("best_ask")
+        base_low = st.get("base_low", px)
 
-        # --- score: need 2 of 3 ---
-        s = 0
-        reasons = []
-        if d5 <= -CVD_FLIP and slope15 <= 0:
-            s += 1; reasons.append(f"Flow flip: ΔCVD5={d5:.0f}, slope15<=0")
-        if rvol_ratio >= RVOL_RED_OVER_GREEN:
-            s += 1; reasons.append(f"RVOL red/green={rvol_ratio:.2f}≥{RVOL_RED_OVER_GREEN}")
-        if (px is not None) and (px < base_low or mom5_bps <= MOM5_DOWN):
-            s += 1; reasons.append(f"Structure: mom5={mom5_bps:.0f}bps or lost base")
+        vwin_min = int(os.getenv("PG_VWAP_MINUTES", "20"))
+        wv = [r for r in trades[symbol] if r[0] >= now - 60 * vwin_min]
+        vwap = None
+        if wv:
+            num = sum((r[1] or 0.0) * (r[2] or 0.0) for r in wv)
+            den = sum((r[2] or 0.0) for r in wv)
+            vwap = (num / den) if den else None
 
-        # require 2/3 for two consecutive checks
+        # --- thresholds (sane ADA defaults; override via env) ---
+        CVD5    = float(os.getenv("PG_CVD_5M_NEG", "1500"))
+        CVD2    = float(os.getenv("PG_CVD_2M_NEG", "800"))
+        RVR     = float(os.getenv("PG_RVOL_RATIO", "1.2"))
+        PUSHMIN = float(os.getenv("PG_PUSH_RVOL_MIN", "0.7"))
+        MOM5    = float(os.getenv("PG_MOM5_DOWN_BPS", "-8"))
+        MAX_AGE = 60 * float(os.getenv("POSTURE_MAX_AGE_MIN", "30"))
+
+        # aging metrics
+        time_in_state   = now - st.get("started_at", now)
+        time_since_peak = now - st.get("peak_ts", st.get("started_at", now))
+
+        # --- maintain peak markers (used by aging rule) ---
+        if px and px >= st.get("peak_price", px):
+            st["peak_price"] = px
+            st["peak_ts"] = now
+
+        # --- cue evaluation ---
+        reasons: list[str] = []
+
+        flow_flip = (d5 <= -CVD5) or (d2 <= -CVD2) or (s15 <= 0)
+        if flow_flip:
+            reasons.append(f"Flow flip (Δ2m={d2:.0f}, Δ5m={d5:.0f}, slope15<=0)")
+
+        rvol_flip = (rvol_ratio >= RVR) or (push_rvol < PUSHMIN)
+        if rvol_flip:
+            reasons.append(f"RVOL stall/flip (red/green={rvol_ratio:.2f}, push={push_rvol:.2f})")
+
+        structure_break = ((px is not None and base_low is not None and px < base_low) or
+                           (vwap is not None and px is not None and px < vwap) or
+                           (mom5_bps <= MOM5))
+        if structure_break:
+            reasons.append(f"Structure/VWAP (px<{base_low if base_low is not None else '—'} "
+                           f"or px<VWAP or mom5={mom5_bps:.0f}bps)")
+
+        aging = (time_in_state > MAX_AGE and time_since_peak > 300)  # >max age and no new high in 5m
+        if aging:
+            reasons.append(f"Aging posture ({time_in_state/60:.0f}m, no new high {time_since_peak/60:.0f}m)")
+
+        score = int(flow_flip) + int(rvol_flip) + int(structure_break) + int(aging)
+
+        # consecutive-check smoothing
         prev = self._last_score.get(symbol, 0)
-        self._last_score[symbol] = s
-        if s >= 2 and prev >= 2:
-            # clear posture and emit exit
-            POSTURE_STATE.pop(symbol, None)
+        self._last_score[symbol] = score
+
+        if score >= 2 and prev >= 2:
+            POSTURE_STATE.pop(symbol, None)  # clear posture
             return {
                 "score": 8.0,
                 "label": "posture_exit",
                 "details": {
                     "action": "consider-exit",
-                    "confidence": 0.8,
+                    "confidence": 0.80,
                     "reasons": reasons[:3],
-                    "delta5": d5, "rvol_ratio": rvol_ratio, "mom5_bps": mom5_bps,
+                    "metrics": {
+                        "d2": d2, "d5": d5, "rvol_ratio": rvol_ratio, "push_rvol": push_rvol,
+                        "mom5_bps": mom5_bps, "vwap": vwap, "px": px, "base_low": base_low
+                    }
                 }
             }
+
         return None
+
 
 
 # ---- LLM Analyst Agent -------------------------------------------------------
@@ -823,14 +882,16 @@ async def agents_loop():
 
             now = time.time()
 
-            # Update posture peak price once per loop per symbol
+            # Keep POSTURE_STATE peak markers fresh once per loop per symbol
             for sym in SYMBOLS:
                 st = POSTURE_STATE.get(sym)
                 if st and st.get("state") == "long_bias":
                     sig = compute_signals(sym)
                     px = sig.get("best_ask") or sig.get("best_bid")
                     if px:
-                        st["peak_price"] = max(st.get("peak_price", px), px)
+                        if px >= st.get("peak_price", px):
+                            st["peak_price"] = px
+                            st["peak_ts"] = time.time()
 
             for agent in AGENTS:
                 for sym in SYMBOLS:
@@ -844,14 +905,15 @@ async def agents_loop():
                         finding = await agent.run_once(sym)
                         _last_run_ts[key] = time.time()
                         pg_agent_heartbeat(agent.name, "ok")
+
                         if not finding:
                             continue
 
-                        # Gate low-score LLM inserts (reduce noise)
+                        # Reduce noise: drop weak LLM findings from persistence
                         if agent.name == "llm_analyst" and float(finding.get("score", 0.0)) < LLM_ANALYST_MIN_SCORE:
                             continue
 
-                        # Persist
+                        # Persist finding
                         pg_insert_finding(
                             agent.name, sym,
                             float(finding["score"]),
@@ -859,7 +921,7 @@ async def agents_loop():
                             finding.get("details") or {}
                         )
 
-                        # Maintain posture state based on LLM guidance
+                        # Maintain posture based on LLM guidance
                         if agent.name == "llm_analyst":
                             det = finding.get("details") or {}
                             act = (det.get("action") or "").lower()
@@ -868,21 +930,25 @@ async def agents_loop():
                             if act == "consider-entry" and conf >= POSTURE_ENTRY_CONF:
                                 sig = compute_signals(sym)
                                 px = sig.get("best_ask") or sig.get("best_bid")
-                                # Use last 5m low as base; fallback to current price
+
+                                # Base: last 5m swing low; fallback to current px
                                 now2 = time.time()
-                                win = [r for r in trades[sym] if r[0] >= now2 - 300]
-                                base_low = min((r[1] for r in win), default=px or 0.0) or px
+                                w5 = [r for r in trades[sym] if r[0] >= now2 - 300]
+                                base_low = min((r[1] for r in w5), default=px or 0.0) or px
+
                                 POSTURE_STATE[sym] = {
                                     "state": "long_bias",
                                     "started_at": now2,
                                     "entry_price": px,
                                     "base_low": base_low,
                                     "peak_price": px,
+                                    "peak_ts": now2,
                                 }
+
                             elif act == "consider-exit" and POSTURE_STATE.get(sym, {}).get("state") == "long_bias":
                                 POSTURE_STATE.pop(sym, None)
 
-                        # Optional Slack posting (kept conservative)
+                        # Optional Slack posting (kept conservative & cooldowned)
                         if ALERT_WEBHOOK_URL and not SLACK_ANALYSIS_ONLY:
                             if agent.name == "llm_analyst":
                                 det = finding.get("details") or {}
@@ -897,15 +963,17 @@ async def agents_loop():
                                         await _post_webhook({"text": f"RVOL spike {sym}", "blocks": _blocks_for_rvol(sym, finding)})
 
                     except Exception:
+                        # Best-effort heartbeat to show we tried, then continue
                         pg_agent_heartbeat(agent.name, "error")
-                        # Optionally log the exception here
+                        # (optional) add a logger.error here with exception details
                         pass
 
         except Exception:
-            # Optionally log the outer exception here
+            # (optional) add a logger.error here with exception details
             pass
 
         await asyncio.sleep(5)
+
 
 async def digest_loop():
     interval = int(os.getenv("ALERT_SUMMARY_INTERVAL","0") or "0")
