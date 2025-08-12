@@ -657,6 +657,25 @@ AGENTS: List[Agent] = [
 
 _last_run_ts: Dict[Tuple[str,str], float] = defaultdict(lambda: 0.0)
 
+async def market_loop():
+    """Streams trades/orderbook and fills trades[symbol]. Robust reconnect."""
+    import asyncio, json, websockets, time
+    while True:
+        try:
+            # (example Coinbase feed — use your existing one)
+            uri = "wss://ws-feed.exchange.coinbase.com"
+            subs = [{"type": "subscribe", "channels": [{"name": "ticker", "product_ids": SYMBOLS}]}]
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as ws:
+                await ws.send(json.dumps(subs[0]))
+                while True:
+                    msg = json.loads(await ws.recv())
+                    # parse -> append into trades[symbol], update best_bid/ask, etc.
+                    # your existing parse code here
+        except Exception as e:
+            # small backoff, then reconnect
+            await asyncio.sleep(2.0)
+
+
 async def agents_loop():
     while True:
         try:
@@ -778,9 +797,29 @@ async def root():
             f"<pre style='color:#b00'>index error: {e}</pre>"
         )
 
+# --- startup tasks -----------------------------------------------------------
+_feed_task = None
+_agents_task = None
+
 @app.on_event("startup")
 async def _startup():
-    asyncio.create_task(agents_loop())
+    global _feed_task, _agents_task
+    if _feed_task is None or _feed_task.done():
+        _feed_task = asyncio.create_task(market_loop(), name="market_loop")
+    if _agents_task is None or _agents_task.done():
+        _agents_task = asyncio.create_task(agents_loop(), name="agents_loop")
+
+@app.post("/feed/restart")
+async def feed_restart():
+    global _feed_task
+    try:
+        if _feed_task and not _feed_task.done():
+            _feed_task.cancel()
+        _feed_task = asyncio.create_task(market_loop(), name="market_loop")
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
