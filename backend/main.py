@@ -658,22 +658,43 @@ AGENTS: List[Agent] = [
 _last_run_ts: Dict[Tuple[str,str], float] = defaultdict(lambda: 0.0)
 
 async def market_loop():
-    """Streams trades/orderbook and fills trades[symbol]. Robust reconnect."""
-    import asyncio, json, websockets, time
+    """Stream Coinbase ticker -> fill `trades` and `best_px` with robust reconnect."""
+    import asyncio, json, time, websockets
+
+    def _f(x):
+        try: return float(x)
+        except: return None
+
     while True:
         try:
-            # (example Coinbase feed — use your existing one)
             uri = "wss://ws-feed.exchange.coinbase.com"
-            subs = [{"type": "subscribe", "channels": [{"name": "ticker", "product_ids": SYMBOLS}]}]
+            sub = {"type": "subscribe",
+                   "channels": [{"name": "ticker", "product_ids": SYMBOLS}]}
             async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as ws:
-                await ws.send(json.dumps(subs[0]))
+                await ws.send(json.dumps(sub))
                 while True:
                     msg = json.loads(await ws.recv())
-                    # parse -> append into trades[symbol], update best_bid/ask, etc.
-                    # your existing parse code here
-        except Exception as e:
-            # small backoff, then reconnect
-            await asyncio.sleep(2.0)
+                    if msg.get("type") != "ticker":
+                        continue
+                    sym = msg.get("product_id")
+                    if sym not in trades:
+                        continue
+
+                    ts   = time.time()
+                    px   = _f(msg.get("price")) or _f(msg.get("best_bid")) or _f(msg.get("best_ask"))
+                    size = _f(msg.get("last_size")) or 0.0
+                    side = msg.get("side")  # "buy" | "sell"
+
+                    if px:
+                        trades[sym].append((ts, px, size, side))
+
+                    bb, ba = _f(msg.get("best_bid")), _f(msg.get("best_ask"))
+                    if bb or ba:
+                        old_bb, old_ba = best_px.get(sym, (None, None))
+                        best_px[sym] = (bb or old_bb, ba or old_ba)
+        except Exception:
+            await asyncio.sleep(2.0)  # backoff then reconnect
+
 
 
 async def agents_loop():
