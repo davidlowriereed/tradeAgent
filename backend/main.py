@@ -762,19 +762,20 @@ app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    # Serve the dashboard HTML that lives alongside main.py
+    """Serve the dashboard HTML from backend/templates/index.html"""
     here = os.path.dirname(__file__)
-    index_path = os.path.join(here, "index.html")
+    index_path = os.path.join(here, "templates", "index.html")
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             return HTMLResponse(f.read())
-    except Exception:
-        # Fallback (so the app still responds if file is missing)
+    except Exception as e:
+        # Fallback so the app still responds if the file isn't found
         return HTMLResponse(
             "<h3>Opportunity Radar (Alpha)</h3>"
             "<p>See <a href='/signals'>/signals</a>, "
             "<a href='/findings'>/findings</a>, "
             "<a href='/health'>/health</a></p>"
+            f"<pre style='color:#b00'>index error: {e}</pre>"
         )
 
 @app.on_event("startup")
