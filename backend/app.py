@@ -7,8 +7,24 @@ from .signals import compute_signals
 from .db import connect_async, fetch_findings, list_agents_last_run, pg_conn
 from backend.services.market import market_loop
 from .scheduler import agents_loop, AGENTS
+from fastapi import Body, Query
+from .state import get_position, set_position
 
 app = FastAPI()
+
+@app.post("/position")
+async def set_pos(
+    payload: dict = Body(...),
+):
+    # payload = {"symbol":"BTC-USD","status":"long","qty":1.2,"avg_price":123.45}
+    sym = payload.get("symbol")
+    st  = payload.get("status")
+    qty = float(payload.get("qty") or 0)
+    ap  = payload.get("avg_price")
+    if not sym or st not in ("flat","long","short"):
+        return {"ok": False, "error": "symbol/status required"}
+    await set_position(sym, st, qty, ap)
+    return {"ok": True, "position": get_position(sym)}
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
