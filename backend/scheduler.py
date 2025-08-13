@@ -15,6 +15,7 @@ from .agents.cvd_divergence import CvdDivergenceAgent
 from .agents.trend_score import TrendScoreAgent
 from .agents.llm_analyst import LLMAnalystAgent
 from .agents.posture_guard import PostureGuardAgent
+from backend.agents.macro_watcher import MacroWatcherAgent
 
 AGENTS = [
     RVOLSpikeAgent(),
@@ -22,7 +23,7 @@ AGENTS = [
     TrendScoreAgent(),
     LLMAnalystAgent(),
     PostureGuardAgent(),
-    MacroWatcherAgent(),  # <= add this
+    MacroWatcherAgent(),
 ]
 
 _last_run_ts: dict[tuple, float] = defaultdict(lambda: 0.0)
