@@ -82,37 +82,26 @@
 <script>
 const $ = sel => document.querySelector(sel);
 const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "-" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
-const ago = ts => {
-  const t = new Date(ts), s = Math.max(0, (Date.now()-t.getTime())/1000);
-  if (s<60) return `${Math.floor(s)}s ago`;
-  if (s<3600) return `${Math.floor(s/60)}m ago`;
-  return `${Math.floor(s/3600)}h ago`;
-};
+const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t.getTime())/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
+const esc = s => String(s ?? '').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
-let SYMBOLS = [];
-let current = null;
-let timers = [];
+let SYMBOLS=[], current=null, timers=[];
+function clearTimers(){ timers.forEach(clearInterval); timers=[]; }
 
-async function init() {
-  try {
-    const h = await (await fetch('/health')).json();
-    SYMBOLS = h.symbols || [];
-    const sel = $('#symbol');
-    sel.innerHTML = SYMBOLS.map(s => `<option value="${s}">${s}</option>`).join('');
-    current = sel.value = (SYMBOLS[0] || 'BTC-USD');
-    sel.addEventListener('change', () => { current = sel.value; boot(); });
-    boot();
-  } catch (e) {
-    console.error(e);
-  }
+async function init(){
+  const h = await (await fetch('/health')).json();
+  SYMBOLS = h.symbols || [];
+  const sel = $('#symbol');
+  sel.innerHTML = SYMBOLS.map(s=>`<option value="${s}">${s}</option>`).join('');
+  current = sel.value = (SYMBOLS[0] || 'BTC-USD');
+  sel.addEventListener('change', ()=>{ current = sel.value; boot(); });
+  boot();
 }
-
-function clearTimers(){ timers.forEach(t=>clearInterval(t)); timers = []; }
 
 function boot(){
   clearTimers();
   $('#csv').href = `/export-csv?symbol=${encodeURIComponent(current)}&limit=1000`;
-  pullSignals();  pullFindings();  pullHealth();
+  pullSignals(); pullFindings(); pullHealth();
   timers.push(setInterval(pullSignals, 3000));
   timers.push(setInterval(pullFindings, 3000));
   timers.push(setInterval(pullHealth, 5000));
@@ -121,34 +110,21 @@ function boot(){
 async function pullSignals(){
   try{
     const s = await (await fetch(`/signals?symbol=${encodeURIComponent(current)}`)).json();
-    $('#cvd').textContent = fmtNum(s.cvd, 4);
-    $('#vol5').textContent = fmtNum(s.volume_5m, 2);
+    $('#cvd').textContent = fmtNum(s.cvd,4);
+    $('#vol5').textContent = fmtNum(s.volume_5m,2);
     $('#rvol').textContent = (s.rvol_vs_recent==null? '0.00x' : fmtNum(s.rvol_vs_recent,2)+'x');
-    const ba = `${fmtNum(s.best_bid,2)} / ${fmtNum(s.best_ask,2)}`;
-    $('#ba').textContent = ba;
+    $('#ba').textContent = `${fmtNum(s.best_bid,2)} / ${fmtNum(s.best_ask,2)}`;
     $('#cached').textContent = fmtNum(s.trades_cached,0);
   }catch(e){ console.error(e); }
 }
 
-// map an action string to a colored pill class
-function actionPillClass(action){
-  const a = (action || '').toLowerCase();
-  if (a === 'consider-entry' || a === 'enter' || a === 'enter-trade') return 'pill-green';
-  if (a === 'consider-exit'  || a === 'exit'  || a === 'exit-trade')  return 'pill-red';
-  if (a === 'observe' || a === 'hold') return 'pill-yellow';
-  return 'pill-blue';
-}
-
-<script>
-function esc(s){ return String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
-
+// colored action chip
 function actionPill(action){
-  const a = (action || '').toLowerCase();
-  // green for entries/continue, red for exits/reductions/reversals, yellow for observe/neutral, blue fallback
-  const cls = (a.includes('exit') || a.includes('reduce') || a.includes('close')) ? 'pill-red'
-            : (a.includes('enter') || a.includes('long') || a.includes('short') || a.includes('consider')) ? 'pill-green'
-            : (a.includes('observe') || a.includes('hold') || a.includes('wait')) ? 'pill-yellow'
-            : 'pill-blue';
+  const a = (action||'').toLowerCase();
+  const cls = (a.includes('exit')||a.includes('reduce')||a.includes('close')||a.includes('reverse')) ? 'pill-red'
+           : (a.includes('enter')||a.includes('continue')||a.includes('consider-entry')) ? 'pill-green'
+           : (a.includes('observe')||a.includes('hold')||a.includes('wait')) ? 'pill-yellow'
+           : 'pill-blue';
   return `<span class="pill ${cls}">${esc(action)}</span>`;
 }
 
@@ -157,135 +133,77 @@ function renderFinding(f){
   let header = `<span class="label">${esc(f.agent)}</span> · <span class="muted">${esc(f.label)}</span> · <span class="muted">score ${fmtNum(f.score,2)}</span>`;
   header += ` <span class="pill muted">${esc(f.ts_utc)}</span>`;
 
-  // Nicely format LLM errors
-  if (f.agent === 'llm_analyst' && f.label === 'llm_error'){
-    const raw = esc((d.raw || '').slice(0, 300));
-    const err = esc(d.error || 'LLM parse error');
+  // 1) pretty LLM error
+  if (f.agent==='llm_analyst' && f.label==='llm_error'){
+    const raw = esc((d.raw||'').slice(0,300));
+    const err = esc(d.error||'LLM parse error');
     return `<div class="finding">
       <div>${header}</div>
       <div class="muted" style="margin-top:4px"><b>LLM error:</b> ${err}</div>
-      ${raw ? `<pre class="muted" style="white-space:pre-wrap; margin-top:4px;">${raw}</pre>` : ''}
+      ${raw ? `<pre class="muted" style="white-space:pre-wrap;margin-top:4px">${raw}</pre>` : ''}
     </div>`;
   }
 
-  // LLM analysis with action pill
-  if (f.agent === 'llm_analyst' && d.action){
-    let tweakHtml = '';
-    if (Array.isArray(d.tweaks) && d.tweaks.length){
-      tweakHtml = `<ul style="margin:6px 0 0 16px">${d.tweaks.slice(0,5).map(t => `<li class="muted">${esc(t)}</li>`).join('')}</ul>`;
-    }
+  // 2) normal LLM analysis with colored pill
+  if (f.agent==='llm_analyst' && d.action){
+    const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
+      ? `<ul style="margin:6px 0 0 16px">${d.tweaks.slice(0,5).map(t=>`<li class="muted">${esc(t)}</li>`).join('')}</ul>` : '';
     return `<div class="finding">
       <div>${header}</div>
-      <div style="margin:6px 0 0 2px;">
-        <b>Action:</b> ${actionPill(d.action)} <span class="muted">conf ${fmtNum(d.confidence,2)}</span>
-      </div>
+      <div style="margin:6px 0 0 2px"><b>Action:</b> ${actionPill(d.action)} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
       ${d.rationale ? `<div class="muted" style="margin:4px 0 0 2px">${esc(d.rationale)}</div>` : ''}
-      ${tweakHtml}
+      ${tweaks}
     </div>`;
   }
 
-  // trend_score
-  if (f.agent === 'trend_score'){
-    const p = d || {};
-    return `<div class="finding">
-      <div>${header}</div>
-      <div class="muted mono" style="margin-top:4px">
-        p_up=${fmtNum(p.p_up,3)} · p_1m=${fmtNum(p.p_1m,3)} · p_5m=${fmtNum(p.p_5m,3)} · p_15m=${fmtNum(p.p_15m,3)}
-      </div>
+  if (f.agent==='trend_score'){
+    const p=d;
+    return `<div class="finding"><div>${header}</div>
+      <div class="muted mono" style="margin-top:4px">p_up=${fmtNum(p.p_up,3)} · p_1m=${fmtNum(p.p_1m,3)} · p_5m=${fmtNum(p.p_5m,3)} · p_15m=${fmtNum(p.p_15m,3)}</div>
     </div>`;
   }
 
-  // rvol / cvd
-  if (f.agent === 'rvol_spike'){
+  if (f.agent==='rvol_spike'){
     return `<div class="finding"><div>${header}</div>
       <div class="muted" style="margin-top:4px">RVOL=${fmtNum((d||{}).rvol,2)} Vol5=${fmtNum((d||{}).volume_5m,0)}</div>
     </div>`;
   }
-  if (f.agent === 'cvd_divergence'){
+
+  if (f.agent==='cvd_divergence'){
     return `<div class="finding"><div>${header}</div>
       <div class="muted" style="margin-top:4px">ΔCVD(5m)=${fmtNum((d||{}).delta_5m,2)}</div>
     </div>`;
   }
 
-  // posture_guard
-  if (f.agent === 'posture_guard' && (d||{}).action){
+  if (f.agent==='posture_guard' && d.action){
     return `<div class="finding"><div>${header}</div>
       <div><b>Action:</b> ${actionPill(d.action)} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
     </div>`;
   }
 
-  // default
   return `<div class="finding"><div>${header}</div>
     <div class="muted mono" style="margin-top:4px">${esc(JSON.stringify(d))}</div>
-  </div>`;
-}
-</script>
-
-  // Trend score formatting
-  if (f.agent === 'trend_score'){
-    const p = d || {};
-    return `<div class="finding">
-      <div>${header}</div>
-      <div class="muted mono" style="margin-top:4px">
-        p_up=${fmtNum(p.p_up,3)} · p_1m=${fmtNum(p.p_1m,3)} · p_5m=${fmtNum(p.p_5m,3)} · p_15m=${fmtNum(p.p_15m,3)}
-      </div>
-    </div>`;
-  }
-
-  // rvol / cvd specific
-  if (f.agent === 'rvol_spike'){
-    return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">RVOL=${fmtNum((d||{}).rvol,2)} Vol5=${fmtNum((d||{}).volume_5m,0)}</div>
-    </div>`;
-  }
-  if (f.agent === 'cvd_divergence'){
-    return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">ΔCVD(5m)=${fmtNum((d||{}).delta_5m,2)}</div>
-    </div>`;
-  }
-
-  // posture guard: same pill treatment
-  if (f.agent === 'posture_guard' && d.action){
-    const cls = actionPillClass(d.action);
-    return `<div class="finding"><div>${header}</div>
-      <div style="margin-top:4px">
-        <b>Action:</b> <span class="pill-chip ${cls}">${(d.action||'observe')}</span>
-        <span class="muted">conf ${fmtNum(d.confidence,2)}</span>
-      </div>
-    </div>`;
-  }
-
-  // default
-  return `<div class="finding"><div>${header}</div>
-    <div class="muted mono" style="margin-top:4px">${JSON.stringify(d).replace(/"/g,'&quot;')}</div>
   </div>`;
 }
 
 async function pullFindings(){
   try{
     const res = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=80`)).json();
-    const list = res.findings || [];
-    $('#findings').innerHTML = list.map(renderFinding).join('');
+    $('#findings').innerHTML = (res.findings||[]).map(renderFinding).join('');
   }catch(e){ console.error(e); }
 }
 
 async function pullHealth(){
   try{
     const h = await (await fetch('/health')).json();
-    const now = Date.now();
-    const staleSec = 120;
-    const cards = [];
-    for (const [agent, obj] of Object.entries(h.agents || {})){
-      const last = obj.last_run ? new Date(obj.last_run).getTime() : 0;
-      const age = (now - last)/1000;
-      let cls = "ok", label = "OK";
-      if (age > staleSec) { cls="stale"; label="STALE"; }
-      cards.push(`<div class="agent">
-        <div class="row"><div><b>${agent}</b></div><div class="${cls}">${label}</div></div>
-        <div class="muted" style="margin-top:6px">Last run: ${obj.last_run ? ago(obj.last_run) : '—'}</div>
-      </div>`);
-    }
-    $('#health').innerHTML = cards.join('');
+    const now = Date.now(), stale=120;
+    $('#health').innerHTML = Object.entries(h.agents||{}).map(([agent,obj])=>{
+      const age = obj.last_run ? (now-new Date(obj.last_run).getTime())/1000 : 9e9;
+      const cls = age>stale ? 'stale' : 'ok';
+      const label = age>stale ? 'STALE' : 'OK';
+      return `<div class="agent"><div class="row"><div><b>${agent}</b></div><div class="${cls}">${label}</div></div>
+        <div class="muted" style="margin-top:6px">Last run: ${obj.last_run?ago(obj.last_run):'—'}</div></div>`;
+    }).join('');
   }catch(e){ console.error(e); }
 }
 
