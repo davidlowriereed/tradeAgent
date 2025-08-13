@@ -1,6 +1,6 @@
 # backend/agents/llm_analyst.py  (full replace)
 
-import json, asyncio, time
+import re, json, asyncio, httpx  # keep/import as needed
 from typing import Optional
 
 from ..signals import compute_signals, _dcvd, _mom_bps
@@ -87,50 +87,109 @@ class LLMAnalystAgent(Agent):
              "content": "Context:\n" + json.dumps(ctx)[: self.max_tokens * 3] + "\nReturn JSON only."},
         ]
 
-    async def run_once(self, symbol: str) -> Optional[dict]:
-        if not self.enabled or self._client is None:
-            return {
-                "score": 0.0,
-                "label": "llm_skipped",
-                "details": {"reason": self.disable_reason or ("no_client" if self._client is None else "disabled")},
-            }
+def _normalize_tweaks(t):
+    """
+    Accepts list/dict/str and returns a short list of human-friendly strings.
+    Prevents 'unhashable type: slice' by never slicing a dict.
+    """
+    out = []
+    if t is None:
+        return out
+    # If the model sends a dict like {"monitor":"...", "risk_management":"..."}
+    if isinstance(t, dict):
+        for k, v in list(t.items())[:8]:
+            out.append(f"{str(k)}: {str(v)}")
+        return out[:5]
+    # If it sends a single string
+    if isinstance(t, str):
+        return [t][:5]
+    # If it's a list, support either strings or {param,delta,reason}
+    if isinstance(t, list):
+        for item in t:
+            if isinstance(item, dict):
+                param = str(item.get("param") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                try:
+                    delta = float(item.get("delta"))
+                    delta_s = f"{'+' if delta>=0 else ''}{delta}"
+                except Exception:
+                    delta_s, reason = "", (reason or "model-suggested")
+                if param:
+                    s = f"{param}: {delta_s}".strip()
+                    if reason:
+                        s += f" — {reason}"
+                    out.append(s)
+            elif isinstance(item, str):
+                m = re.match(r"\s*([A-Za-z0-9_.:-]+)\s*:\s*([+\-]?\d+(?:\.\d+)?)", item)
+                out.append(item if not m else f"{m.group(1)}: {m.group(2)}")
+        return out[:5]
+    # Anything else → stringified and clipped
+    out.append(str(t))
+    return out[:5]
 
-        ctx = await self._gather_context(symbol)
-        msgs = self._prompt(ctx)
+async def run_once(self, symbol) -> Optional[dict]:
+    if not self.enabled or self._client is None:
+        return None
 
-        raw = None
-        try:
-            resp = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._client.chat.completions.create(
-                    model=self.model,
-                    messages=msgs,
-                    response_format={"type": "json_object"},
-                    temperature=0.2,
-                    max_tokens=600,
-                ),
+    # Build context as before
+    ctx = await self._gather_context(symbol)
+    # Drop prior llm_error items so we don’t feed back errors
+    if isinstance(ctx.get("recent_findings"), list):
+        ctx["recent_findings"] = [f for f in ctx["recent_findings"] if str(f.get("label")) != "llm_error"]
+
+    msgs, _schema = self._prompt(ctx)
+
+    raw = None
+    try:
+        # Call OpenAI without blocking the loop
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._client.chat.completions.create(
+                model=self.model,
+                messages=msgs,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=600,
             )
-            raw = resp.choices[0].message.content or "{}"
-            data = json.loads(raw)
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
 
-            action = (data.get("action") or "observe").strip()
-            confidence = max(0.0, min(1.0, float(data.get("confidence") or 0.0)))
-            rationale = str(data.get("rationale") or "").strip()
-            tweaks = data.get("tweaks") or []
+        action = (data.get("action") or "observe").strip().lower()
+        try:
+            confidence = float(data.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
 
-            return {
-                "score": round(confidence * 10.0, 2),
-                "label": "llm_analysis",
-                "details": {
-                    "action": action,
-                    "confidence": confidence,
-                    "rationale": rationale[:600],
-                    "tweaks": tweaks[:5],
-                },
-            }
+        rationale = str(data.get("rationale") or "").strip()
+        tweaks = _normalize_tweaks(data.get("tweaks"))
 
-        except Exception as e:
-            det = {"error": f"{type(e).__name__}: {str(e)[:180]}"}
-            if raw:
-                det["raw"] = raw[:400]
-            return {"score": 0.0, "label": "llm_error", "details": det}
+        finding = {
+            "score": round(confidence * 10.0, 2),
+            "label": "llm_analysis",
+            "details": {
+                "action": action,
+                "confidence": round(confidence, 2),
+                "rationale": rationale[:600],
+                "tweaks": tweaks,
+            },
+        }
+
+        # Optional Slack ping
+        if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
+            txt = f"🧠 LLM Analyst | {symbol} | {action} (conf {confidence:.2f}) — {rationale[:160]}"
+            try:
+                await httpx.AsyncClient(timeout=10).post(ALERT_WEBHOOK_URL, json={"text": txt, "content": txt})
+            except Exception:
+                pass
+
+        self._last_hash[symbol] = (raw or "")[:800]
+        return finding
+
+    except Exception as e:
+        err = f"{type(e).__name__}: {str(e)[:180]}"
+        det = {"error": err}
+        if raw:
+            det["raw"] = raw[:400]
+        return {"score": 0.0, "label": "llm_error", "details": det}
