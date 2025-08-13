@@ -1,145 +1,43 @@
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Opportunity Radar (Alpha)</title>
-  <style>
-    :root{
-      --bg:#0f1115;--card:#171a21;--muted:#9aa4b2;--text:#e8edf2;--ok:#38d39f;--warn:#f5c451;--bad:#ff6b6b;--blue:#5aa2ff;
-    }
-    *{box-sizing:border-box}
-    body{margin:16px;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
-    header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-    h1{font-size:20px;margin:0 8px 0 0}
-    select,button{background:#0e1117;color:var(--text);border:1px solid #2a2f3a;border-radius:8px;padding:8px 10px}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px;margin:16px 0}
-    .card{background:var(--card);border:1px solid #222636;border-radius:12px;padding:12px;min-height:76px}
-    .title{font-size:12px;color:var(--muted);letter-spacing:.3px;text-transform:uppercase}
-    .big{font-size:20px;margin-top:6px;word-break:break-word}
-    .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
-    .section{margin-top:8px}
-    #findings{height:360px;overflow:auto;border:1px solid #222636;border-radius:12px;background:var(--card);padding:8px}
-    .finding{padding:10px 8px;border-bottom:1px solid #222636}
-    .finding:last-child{border-bottom:none}
-    .label{font-weight:600;color:var(--blue)}
-    .muted{color:var(--muted)}
-    .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid #2a2f3a;color:var(--muted);margin-left:6px}
-    .ok{color:var(--ok)} .stale{color:var(--warn)} .down{color:var(--bad)}
-    .health{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px}
-    .agent{background:var(--card);border:1px solid #222636;border-radius:12px;padding:10px}
-    .mono{font-family: ui-monospace,SFMono-Regular,Menlo,monospace}
-    a{color:#8bb3ff;text-decoration:none}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>Opportunity Radar (Alpha)</h1>
-    <select id="symbol"></select>
-    <a id="csv" class="pill" href="#">export csv</a>
-    <span class="muted">API: <a href="/signals">/signals</a> · <a href="/findings">/findings</a> · <a href="/health">/health</a></span>
-  </header>
-
-  <section class="grid" id="metrics">
-    <div class="card">
-      <div class="title">Cumulative Volume Delta (CVD)</div>
-      <div class="big mono" id="cvd">0</div>
-    </div>
-    <div class="card">
-      <div class="title">5-min Volume</div>
-      <div class="big mono" id="vol5">0</div>
-      <div class="muted">RVOL vs recent: <span class="mono" id="rvol">0.00x</span></div>
-    </div>
-    <div class="card">
-      <div class="title">Best Bid / Ask</div>
-      <div class="big mono" id="ba">- / -</div>
-    </div>
-    <div class="card">
-      <div class="title">Trades Cached</div>
-      <div class="big mono" id="cached">0</div>
-    </div>
-  </section>
-
-  <section class="section">
-    <div class="title" style="margin:6px 0 8px 4px;">Latest Findings</div>
-    <div id="findings"></div>
-  </section>
-
-  <section class="section">
-    <div class="title" style="margin:12px 0 8px 4px;">Agent Health</div>
-    <div class="health" id="health"></div>
-  </section>
-
 <script>
-const $ = sel => document.querySelector(sel);
-const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "-" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
-const ago = ts => {
-  const t = new Date(ts), s = Math.max(0, (Date.now()-t.getTime())/1000);
-  if (s<60) return `${Math.floor(s)}s ago`;
-  if (s<3600) return `${Math.floor(s/60)}m ago`;
-  return `${Math.floor(s/3600)}h ago`;
-};
-
-let SYMBOLS = [];
-let current = null;
-let timers = [];
-
-async function init() {
-  // populate symbols
-  const h = await (await fetch('/health')).json();
-  SYMBOLS = h.symbols || [];
-  const sel = $('#symbol');
-  sel.innerHTML = SYMBOLS.map(s => `<option value="${s}">${s}</option>`).join('');
-  current = SYMBOLS[0] || 'BTC-USD';
-  sel.value = current;
-  sel.addEventListener('change', () => { current = sel.value; boot(); });
-  boot();
-}
-
-function clearTimers(){ timers.forEach(t=>clearInterval(t)); timers = []; }
-
-function boot(){
-  clearTimers();
-  $('#csv').href = `/export-csv?symbol=${encodeURIComponent(current)}&limit=1000`;
-  pullSignals();  pullFindings();  pullHealth();
-  timers.push(setInterval(pullSignals, 3000));
-  timers.push(setInterval(pullFindings, 3000));
-  timers.push(setInterval(pullHealth, 5000));
-}
-
-async function pullSignals(){
-  try{
-    const s = await (await fetch(`/signals?symbol=${encodeURIComponent(current)}`)).json();
-    $('#cvd').textContent = fmtNum(s.cvd, 4);
-    $('#vol5').textContent = fmtNum(s.volume_5m, 2);
-    $('#rvol').textContent = (s.rvol_vs_recent==null? '0.00x' : fmtNum(s.rvol_vs_recent,2)+'x');
-    const ba = `${fmtNum(s.best_bid,2)} / ${fmtNum(s.best_ask,2)}`;
-    $('#ba').textContent = ba;
-    $('#cached').textContent = fmtNum(s.trades_cached,0);
-  }catch(e){ console.error(e); }
-}
-
 function renderFinding(f){
   const d = f.details || {};
-  let header = `<span class="label">${f.agent}</span> · <span class="muted">${f.label}</span> · <span class="muted">score ${fmtNum(f.score,2)}</span>`;
-  header += ` <span class="pill muted">${f.ts_utc}</span>`;
+  const header = (() => {
+    let h = `<span class="label">${f.agent}</span> · <span class="muted">${f.label}</span> · <span class="muted">score ${fmtNum(f.score,2)}</span>`;
+    h += ` <span class="pill muted">${f.ts_utc}</span>`;
+    return h;
+  })();
+
+  // helper to map action -> pill class
+  const actionPill = (action) => {
+    const act = (action || '').toLowerCase();
+    const cls = (act === 'consider-entry') ? 'pill-green'
+             : (act === 'consider-exit')  ? 'pill-red'
+             : (act === 'observe')        ? 'pill-yellow'
+             :                              'pill-blue';
+    return { act, cls };
+  };
 
   // LLM analysis
   if (f.agent === 'llm_analyst' && d.action){
+    const { act, cls } = actionPill(d.action);
+
+    // optional tweaks list
     let tweaks = '';
     if (Array.isArray(d.tweaks) && d.tweaks.length){
-      const list = d.tweaks.map(t => {
-        if (typeof t === 'string') return t;
-        const p = t.param || 'param'; const delta = t.delta || 0; const reason = t.reason || '';
-        return `${p}: ${delta > 0 ? '+' : ''}${delta} ${reason? '— '+reason : ''}`;
-      }).slice(0,4).join('<br/>');
       tweaks = `<ul style="margin:6px 0 0 16px">
-        ${d.tweaks.map(t => `<li class="muted">${typeof t==='string' ? t : `${t.param}: ${t.delta}`}</li>`).join('')}
+        ${d.tweaks.slice(0,4).map(t =>
+          `<li class="muted">${
+            (typeof t === 'string') ? t
+              : `${t.param || 'param'}: ${(t.delta ?? 0)}${t.reason ? ' — ' + t.reason : ''}`
+          }</li>`).join('')}
       </ul>`;
     }
+
     return `<div class="finding">
       <div>${header}</div>
       <div style="margin:6px 0 0 2px;">
-        <b>Action:</b> ${d.action} <span class="muted">(conf ${fmtNum(d.confidence,2)})</span>
+        <b>Action:</b> <span class="pill ${cls}">${act || 'observe'}</span>
+        <span class="muted">conf ${fmtNum(d.confidence,2)}</span>
       </div>
       ${d.rationale ? `<div class="muted" style="margin:4px 0 0 2px">${d.rationale}</div>` : ''}
       ${tweaks}
@@ -169,10 +67,14 @@ function renderFinding(f){
     </div>`;
   }
 
-  // posture guard / generic
-  if (f.agent === 'posture_guard' && (d||{}).action){
+  // posture guard with same colored pill treatment
+  if (f.agent === 'posture_guard' && d.action){
+    const { act, cls } = actionPill(d.action);
     return `<div class="finding"><div>${header}</div>
-      <div><b>Action:</b> ${d.action} <span class="muted">(conf ${fmtNum(d.confidence,2)})</span></div>
+      <div style="margin-top:4px">
+        <b>Action:</b> <span class="pill ${cls}">${act || 'observe'}</span>
+        <span class="muted">conf ${fmtNum(d.confidence,2)}</span>
+      </div>
     </div>`;
   }
 
@@ -181,36 +83,4 @@ function renderFinding(f){
     <div class="muted mono" style="margin-top:4px">${JSON.stringify(d).replace(/"/g,'&quot;')}</div>
   </div>`;
 }
-
-async function pullFindings(){
-  try{
-    const res = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=80`)).json();
-    const list = res.findings || [];
-    $('#findings').innerHTML = list.map(renderFinding).join('');
-  }catch(e){ console.error(e); }
-}
-
-async function pullHealth(){
-  try{
-    const h = await (await fetch('/health')).json();
-    const now = Date.now();
-    const staleSec = 120;
-    const cards = [];
-    for (const [agent, obj] of Object.entries(h.agents || {})){
-      const last = obj.last_run ? new Date(obj.last_run).getTime() : 0;
-      const age = (now - last)/1000;
-      let cls = "ok", label = "OK";
-      if (age > staleSec) { cls="stale"; label="STALE"; }
-      cards.push(`<div class="agent">
-        <div class="row"><div><b>${agent}</b></div><div class="${cls}">${label}</div></div>
-        <div class="muted" style="margin-top:6px">Last run: ${obj.last_run ? ago(obj.last_run) : '—'}</div>
-      </div>`);
-    }
-    $('#health').innerHTML = cards.join('');
-  }catch(e){ console.error(e); }
-}
-
-init();
 </script>
-</body>
-</html>
