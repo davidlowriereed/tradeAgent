@@ -1,10 +1,44 @@
 
 import json, asyncio
 from typing import Optional, List, Dict, Any
-import psycopg2
+import psycopg2, os
 from .config import DATABASE_URL
+from psycopg2.extras import RealDictCursor
 
 pg_conn = None
+
+def pg_connect():
+    global pg_conn
+    if pg_conn:
+        return pg_conn
+    pg_conn = psycopg2.connect(DB_URL)
+    pg_conn.autocommit = True
+    return pg_conn
+
+def pg_exec(sql, params=None):
+    conn = pg_connect()
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        return True
+
+def pg_fetchone(sql, params=None):
+    conn = pg_connect()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, params or ())
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def ensure_schema():
+    pg_exec("""
+    CREATE TABLE IF NOT EXISTS position_state (
+      symbol       TEXT PRIMARY KEY,
+      status       TEXT NOT NULL CHECK (status IN ('flat','long','short')),
+      qty          DOUBLE PRECISION DEFAULT 0,
+      avg_price    DOUBLE PRECISION,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_action  TEXT,
+      last_conf    DOUBLE PRECISION
+    );
 
 def connect_sync():
     global pg_conn
