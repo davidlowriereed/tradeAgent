@@ -1,30 +1,52 @@
+# backend/app.py
 
 import os, io, csv, json, asyncio, httpx
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
+from typing import Optional
+
+from fastapi import FastAPI, Query, Body
+from fastapi.responses import HTMLResponse, StreamingResponse
+
 from .config import SYMBOLS
 from .signals import compute_signals
-from .db import connect_async, fetch_findings, list_agents_last_run, pg_conn
-from backend.services.market import market_loop
+from .db import connect_async, fetch_findings, list_agents_last_run, pg_conn, ensure_schema
+from .services.market import market_loop          # <- relative import
 from .scheduler import agents_loop, AGENTS
-from fastapi import Body, Query
-from .state import get_position, set_position
+from . import state as pos_state                  # <- import the module, not the functions
 
 app = FastAPI()
 
+@app.on_event("startup")
+async def _startup():
+    # Ensure DB schema exists, then start background tasks
+    ensure_schema()
+    asyncio.create_task(market_loop(), name="market_loop")
+    asyncio.create_task(agents_loop(), name="agents_loop")
+
+# -------- Position endpoints (single, unambiguous) --------
+
+@app.get("/position")
+def get_pos(symbol: str = Query(...)):
+    """Return current persisted position state for a symbol."""
+    return pos_state.get_position(symbol)
+
 @app.post("/position")
-async def set_pos(
-    payload: dict = Body(...),
+def set_pos(
+    payload: dict = Body(
+        ...,
+        example={"symbol":"BTC-USD","status":"long","qty":1.2,"avg_price":123.45}
+    ),
 ):
-    # payload = {"symbol":"BTC-USD","status":"long","qty":1.2,"avg_price":123.45}
+    """Set current position. status must be one of flat|long|short."""
     sym = payload.get("symbol")
     st  = payload.get("status")
     qty = float(payload.get("qty") or 0)
     ap  = payload.get("avg_price")
     if not sym or st not in ("flat","long","short"):
-        return {"ok": False, "error": "symbol/status required"}
-    await set_position(sym, st, qty, ap)
-    return {"ok": True, "position": get_position(sym)}
+        return {"ok": False, "error": "symbol/status required (flat|long|short)"}
+    pos = pos_state.set_position(sym, st, qty, ap)   # <- sync; no await
+    return {"ok": True, "position": pos}
+
+# -------- UI --------
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -42,11 +64,7 @@ async def root():
             f"<pre style='color:#b00'>index error: {e}</pre>"
         )
 
-@app.on_event("startup")
-async def _startup():
-    # start feed + agents
-    asyncio.create_task(market_loop(), name="market_loop")
-    asyncio.create_task(agents_loop(), name="agents_loop")
+# -------- API --------
 
 @app.get("/signals")
 async def signals(symbol: str = Query(default=SYMBOLS[0])):
@@ -55,7 +73,7 @@ async def signals(symbol: str = Query(default=SYMBOLS[0])):
     return sig
 
 @app.get("/findings")
-async def findings(symbol: str | None = None, limit: int = 50):
+async def findings(symbol: Optional[str] = None, limit: int = 50):
     return {"findings": fetch_findings(symbol, limit)}
 
 @app.get("/agents")
@@ -69,7 +87,12 @@ async def health():
     except Exception:
         agents = {}
     from .state import trades
-    return {"status":"ok","symbols":SYMBOLS,"trades_cached":{s:len(trades[s]) for s in SYMBOLS},"agents":agents}
+    return {
+        "status":"ok",
+        "symbols":SYMBOLS,
+        "trades_cached":{s:len(trades[s]) for s in SYMBOLS},
+        "agents":agents
+    }
 
 @app.get("/db-health")
 async def db_health():
@@ -105,10 +128,17 @@ async def llm_netcheck():
     except Exception as e:
         return {"ok": False, "error": str(e), "base": base}
 
-# Manual triggers
+# -------- Manual triggers --------
+
 @app.post("/agents/run-now")
-async def run_now(names: str | None = None, agent: str | None = None, symbol: str = Query(default=SYMBOLS[0]), insert: bool = True):
+async def run_now(
+    names: Optional[str] = None,
+    agent: Optional[str] = None,
+    symbol: str = Query(default=SYMBOLS[0]),
+    insert: bool = True
+):
     lookup = {a.name: a for a in AGENTS}
+
     chosen = []
     if names:
         for n in [x.strip() for x in names.split(",")]:
