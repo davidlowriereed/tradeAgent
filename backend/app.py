@@ -12,6 +12,9 @@ from .db import connect_async, fetch_findings, list_agents_last_run, pg_conn, en
 from .services.market import market_loop          # <- relative import
 from .scheduler import agents_loop, AGENTS
 from . import state as pos_state                  # <- import the module, not the functions
+from .github_webhook import router as github_router
+
+app.include_router(github_router)
 
 app = FastAPI()
 
