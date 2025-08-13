@@ -1,6 +1,6 @@
 # backend/db.py
 import os, json, asyncio
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from .config import DATABASE_URL
@@ -8,7 +8,7 @@ from .config import DATABASE_URL
 pg_conn = None
 
 def pg_connect():
-    """Get a global autocommit connection."""
+    """Return a global autocommit connection."""
     global pg_conn
     if pg_conn:
         return pg_conn
@@ -32,7 +32,7 @@ def pg_fetchone(sql: str, params=None) -> Optional[dict]:
     return dict(row) if row else None
 
 def ensure_schema() -> bool:
-    """Create required tables & indexes (safe to call repeatedly)."""
+    """Create required tables & indexes (idempotent)."""
     conn = pg_connect()
     with conn.cursor() as cur:
         # findings (agent outputs)
@@ -46,6 +46,7 @@ def ensure_schema() -> bool:
           details  JSONB
         );
         """)
+
         # agent heartbeats
         cur.execute("""
         CREATE TABLE IF NOT EXISTS agent_runs (
@@ -54,6 +55,7 @@ def ensure_schema() -> bool:
           status TEXT
         );
         """)
+
         # position state (flat/long/short)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS position_state (
@@ -66,13 +68,14 @@ def ensure_schema() -> bool:
           last_conf   DOUBLE PRECISION
         );
         """)
+
         # indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_findings_symbol_ts ON findings(symbol, ts_utc DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_ts ON agent_runs(agent, ts_utc DESC);")
+
     return True
 
 def connect_sync():
-    # kept for backward compatibility; makes sure schema exists
     ensure_schema()
 
 async def connect_async():
@@ -93,6 +96,7 @@ def heartbeat(agent: str, status: str = "ok"):
         cur.execute("INSERT INTO agent_runs(agent, status) VALUES (%s,%s)", (agent, status))
 
 def latest_trend_snapshot(symbol: str) -> Optional[dict]:
+    """Latest trend_score details JSON for a symbol."""
     conn = pg_connect()
     with conn.cursor() as cur:
         cur.execute("""
@@ -103,25 +107,32 @@ def latest_trend_snapshot(symbol: str) -> Optional[dict]:
         row = cur.fetchone()
     return row[0] if row else None
 
-def fetch_findings(symbol: Optional[str], limit: int) -> list[dict]:
+def fetch_findings(symbol: Optional[str], limit: int) -> List[Dict[str, Any]]:
     conn = pg_connect()
     q = "SELECT ts_utc, agent, symbol, score, label, details FROM findings"
-    params = []
+    params: List[Any] = []
     if symbol:
         q += " WHERE symbol=%s"
         params.append(symbol)
     q += " ORDER BY ts_utc DESC LIMIT %s"
     params.append(limit)
-    out = []
+    out: List[Dict[str, Any]] = []
     with conn.cursor() as cur:
         cur.execute(q, params)
         for ts, a, sym, sc, lb, det in cur.fetchall():
-            out.append({"ts_utc": str(ts), "agent": a, "symbol": sym, "score": float(sc), "label": lb, "details": det})
+            out.append({
+                "ts_utc": str(ts),
+                "agent": a,
+                "symbol": sym,
+                "score": float(sc) if sc is not None else None,
+                "label": lb,
+                "details": det,
+            })
     return out
 
-def list_agents_last_run() -> list[dict]:
+def list_agents_last_run() -> List[Dict[str, Any]]:
     conn = pg_connect()
-    out = []
+    out: List[Dict[str, Any]] = []
     with conn.cursor() as cur:
         cur.execute("SELECT agent, MAX(ts_utc) FROM agent_runs GROUP BY agent")
         for a, ts in cur.fetchall():
