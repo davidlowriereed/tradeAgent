@@ -64,6 +64,12 @@ class LLMAnalystAgent(Agent):
         now = time.time()
         # last 120s of raw trades for short-horizon derived features
         recent = [r for r in (STATE_TRADES.get(symbol) or []) if r[0] >= now - 120]
+        pos = state.get_position(symbol)
+        ctx["position"] = {
+            "status": pos["status"],   # flat|long|short
+            "qty": pos.get("qty") or 0,
+            "avg_price": pos.get("avg_price"),
+}
         ctx = {
             "symbol": symbol,
             "signals": sig | {
