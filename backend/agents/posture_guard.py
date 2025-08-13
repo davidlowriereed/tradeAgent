@@ -5,6 +5,7 @@ from ..signals import compute_signals, _dcvd, _mom_bps
 from ..state import trades, POSTURE_STATE
 from ..config import POSTURE_GUARD_INTERVAL
 from .base import Agent
+from .. import state
 
 class PostureGuardAgent(Agent):
     def __init__(self, interval_sec: int | None = None):
@@ -14,6 +15,11 @@ class PostureGuardAgent(Agent):
 
     async def run_once(self, symbol: str) -> Optional[dict]:
         st = POSTURE_STATE.get(symbol)
+        pos = state.get_position(symbol)
+        if pos.get("status") != "long":
+            self._persist.pop(symbol, None)
+            return None
+        
         if not st or st.get("state") != "long_bias":
             self._persist.pop(symbol, None)
             return None
