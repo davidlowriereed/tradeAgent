@@ -13,14 +13,13 @@ best_bid: Dict[str, Optional[float]] = {}
 best_ask: Dict[str, Optional[float]] = {}
 
 def best_px(symbol: str) -> Tuple[Optional[float], Optional[float]]:
-    """Return (best_bid, best_ask) for a symbol, or (None, None)."""
     return best_bid.get(symbol), best_ask.get(symbol)
 
 # ---------------------------------------------------------
-# Position / posture state  (DB source + in-memory cache)
+# Position / posture state  (DB + in-memory cache)
 # ---------------------------------------------------------
-# Legacy handle that some modules import directly
-POSTURE_STATE: Dict[str, Dict[str, Any]] = defaultdict(
+# In-memory cache keyed by symbol; used for quick reads
+_POSTURE_CACHE: Dict[str, Dict[str, Any]] = defaultdict(
     lambda: {
         "status": "flat",
         "qty": 0.0,
@@ -31,10 +30,12 @@ POSTURE_STATE: Dict[str, Dict[str, Any]] = defaultdict(
     }
 )
 
+# Back-compat name expected by older modules (e.g., scheduler.py)
+POSTURE_STATE = _POSTURE_CACHE
+
 def _row_to_state(row: Optional[dict], symbol: str) -> Dict[str, Any]:
-    """Normalize a DB row into our posture dict and refresh the cache."""
     if not row:
-        return POSTURE_STATE[symbol]  # creates default via defaultdict
+        return _POSTURE_CACHE[symbol]
     s = {
         "status": row.get("status", "flat"),
         "qty": float(row.get("qty") or 0.0),
@@ -43,11 +44,10 @@ def _row_to_state(row: Optional[dict], symbol: str) -> Dict[str, Any]:
         "last_conf": row.get("last_conf"),
         "updated_at": row.get("updated_at"),
     }
-    POSTURE_STATE[symbol] = s
+    _POSTURE_CACHE[symbol] = s
     return s
 
 def get_position(symbol: str) -> Dict[str, Any]:
-    """Fetch current posture/position from DB (and update cache)."""
     row = pg_fetchone(
         "SELECT symbol,status,qty,avg_price,updated_at,last_action,last_conf "
         "FROM position_state WHERE symbol=%s",
@@ -63,7 +63,6 @@ def set_position(
     last_action: Optional[str] = None,
     last_conf: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Upsert to DB and refresh cache."""
     pg_exec(
         "INSERT INTO position_state(symbol,status,qty,avg_price,last_action,last_conf,updated_at) "
         "VALUES (%s,%s,%s,%s,%s,%s,NOW()) "
@@ -77,3 +76,9 @@ def set_position(
         (symbol, status, qty, avg_price, last_action, last_conf),
     )
     return get_position(symbol)
+
+__all__ = [
+    "trades", "best_bid", "best_ask", "best_px",
+    "get_position", "set_position",
+    "POSTURE_STATE",
+]
