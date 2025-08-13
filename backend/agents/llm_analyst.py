@@ -1,3 +1,5 @@
+# backend/agents/llm_analyst.py  (full replace)
+
 import json, asyncio, time
 from typing import Optional
 
@@ -7,22 +9,20 @@ from ..config import (
     LLM_MIN_INTERVAL, LLM_MAX_INPUT_TOKENS, LLM_ALERT_MIN_CONF,
     SLACK_ANALYSIS_ONLY, ALERT_WEBHOOK_URL, LLM_USE_PROXY, LLM_IGNORE_PROXY,
 )
-from ..db import latest_trend_snapshot
-from ..services.slack import post_webhook  # kept for parity (not used here)
-from ..state import trades as STATE_TRADES   # <-- FIX: import the trades deque directly
+from ..db import latest_trend_snapshot  # keep if you have this
+from ..state import trades as STATE_TRADES
+from .. import state  # <-- import the module so we can call state.get_position
 from .base import Agent
 
 
 class LLMAnalystAgent(Agent):
     """
-    Produces a structured assessment based on live signals:
-
-      details = {
-        action: "observe" | "prepare" | "consider-entry" | "consider-exit",
-        confidence: 0..1,
-        rationale: str,
-        tweaks: [{param, delta, reason}]   # optional
-      }
+    details = {
+      action: "observe" | "prepare" | "consider-entry" | "consider-exit",
+      confidence: 0..1,
+      rationale: str,
+      tweaks: [{param, delta, reason}] (optional)
+    }
     """
 
     def __init__(self, interval_sec: int | None = None):
@@ -34,7 +34,6 @@ class LLMAnalystAgent(Agent):
         self._client = None
         self.disable_reason = None
 
-        # If disabled or no key, the agent will still return a "llm_skipped" finding
         if not OPENAI_API_KEY or not self.enabled:
             if not OPENAI_API_KEY:
                 self.disable_reason = "OPENAI_API_KEY missing"
@@ -54,24 +53,17 @@ class LLMAnalystAgent(Agent):
                     kwargs["http_client"] = httpx.Client(proxy=proxy, timeout=30.0)
             self._client = OpenAI(**kwargs)
         except Exception as e:
-            # fall back to "skipped" findings so we never go completely dark
             self._client = None
             self.disable_reason = f"client_init: {type(e).__name__}"
 
     async def _gather_context(self, symbol: str) -> dict:
-        """Collect a compact context for the LLM."""
         sig = compute_signals(symbol)
         now = time.time()
-        # last 120s of raw trades for short-horizon derived features
         recent = [r for r in (STATE_TRADES.get(symbol) or []) if r[0] >= now - 120]
-        pos = state.get_position(symbol)
-        ctx["position"] = {
-            "status": pos["status"],   # flat|long|short
-            "qty": pos.get("qty") or 0,
-            "avg_price": pos.get("avg_price"),
-}
+
         ctx = {
             "symbol": symbol,
+            "position": state.get_position(symbol),   # <-- persisted 'flat|long|short' etc
             "signals": sig | {
                 "dcvd_2m": _dcvd(recent),
                 "mom1_bps": _mom_bps(recent),
@@ -84,9 +76,10 @@ class LLMAnalystAgent(Agent):
         sys = (
             "You are the LLM Analyst Agent. Decide one of: "
             "observe | prepare | consider-entry | consider-exit. "
-            "Favor caution unless dcvd_2m>0, mom1_bps>0, RVOL>1.2 and "
-            "trend_snapshot.p_up>=0.55 with 5m/15m supportive. "
-            "Output strict JSON {action, confidence, rationale, tweaks}."
+            "Use position.status to keep advice consistent (e.g., if status='long', "
+            "prefer 'consider-exit' or 'continue-long' instead of 'consider-entry'). "
+            "Favor caution unless dcvd_2m>0, mom1_bps>0, RVOL>1.2 and trend_snapshot.p_up>=0.55. "
+            "Output strict JSON {action, confidence, rationale, tweaks} only."
         )
         return [
             {"role": "system", "content": sys},
@@ -95,7 +88,6 @@ class LLMAnalystAgent(Agent):
         ]
 
     async def run_once(self, symbol: str) -> Optional[dict]:
-        # PRE-FLIGHT: never be silent
         if not self.enabled or self._client is None:
             return {
                 "score": 0.0,
@@ -103,13 +95,11 @@ class LLMAnalystAgent(Agent):
                 "details": {"reason": self.disable_reason or ("no_client" if self._client is None else "disabled")},
             }
 
-        # Build messages
-        ctx = await self._gather_context(symbol)  # <-- FIX: method now exists with the right name
+        ctx = await self._gather_context(symbol)
         msgs = self._prompt(ctx)
 
         raw = None
         try:
-            # Call OpenAI in a thread so we don’t block the loop
             resp = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self._client.chat.completions.create(
@@ -124,8 +114,7 @@ class LLMAnalystAgent(Agent):
             data = json.loads(raw)
 
             action = (data.get("action") or "observe").strip()
-            confidence = float(data.get("confidence") or 0.0)
-            confidence = max(0.0, min(1.0, confidence))
+            confidence = max(0.0, min(1.0, float(data.get("confidence") or 0.0)))
             rationale = str(data.get("rationale") or "").strip()
             tweaks = data.get("tweaks") or []
 
