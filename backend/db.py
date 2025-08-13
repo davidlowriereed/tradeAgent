@@ -36,43 +36,48 @@ def ensure_schema() -> bool:
     conn = pg_connect()
     with conn.cursor() as cur:
         # findings (agent outputs)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS findings (
-          ts_utc   TIMESTAMPTZ DEFAULT NOW(),
-          agent    TEXT,
-          symbol   TEXT,
-          score    DOUBLE PRECISION,
-          label    TEXT,
-          details  JSONB
-        );
-        """)
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS findings ("
+            " ts_utc TIMESTAMPTZ DEFAULT NOW(),"
+            " agent  TEXT,"
+            " symbol TEXT,"
+            " score  DOUBLE PRECISION,"
+            " label  TEXT,"
+            " details JSONB"
+            ");"
+        )
 
         # agent heartbeats
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS agent_runs (
-          ts_utc TIMESTAMPTZ DEFAULT NOW(),
-          agent  TEXT,
-          status TEXT
-        );
-        """)
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS agent_runs ("
+            " ts_utc TIMESTAMPTZ DEFAULT NOW(),"
+            " agent  TEXT,"
+            " status TEXT"
+            ");"
+        )
 
         # position state (flat/long/short)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS position_state (
-          symbol      TEXT PRIMARY KEY,
-          status      TEXT NOT NULL CHECK (status IN ('flat','long','short')),
-          qty         DOUBLE PRECISION DEFAULT 0,
-          avg_price   DOUBLE PRECISION,
-          updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          last_action TEXT,
-          last_conf   DOUBLE PRECISION
-        );
-        """)
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS position_state ("
+            " symbol      TEXT PRIMARY KEY,"
+            " status      TEXT NOT NULL CHECK (status IN ('flat','long','short')),"
+            " qty         DOUBLE PRECISION DEFAULT 0,"
+            " avg_price   DOUBLE PRECISION,"
+            " updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            " last_action TEXT,"
+            " last_conf   DOUBLE PRECISION"
+            ");"
+        )
 
         # indexes
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_findings_symbol_ts ON findings(symbol, ts_utc DESC);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_ts ON agent_runs(agent, ts_utc DESC);")
-
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_findings_symbol_ts "
+            "ON findings(symbol, ts_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_ts "
+            "ON agent_runs(agent, ts_utc DESC);"
+        )
     return True
 
 def connect_sync():
@@ -86,24 +91,29 @@ def insert_finding(agent: str, symbol: str, score: float, label: str, details: d
     conn = pg_connect()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO findings(agent, symbol, score, label, details) VALUES (%s,%s,%s,%s,%s)",
+            "INSERT INTO findings(agent, symbol, score, label, details) "
+            "VALUES (%s,%s,%s,%s,%s)",
             (agent, symbol, score, label, json.dumps(details)),
         )
 
 def heartbeat(agent: str, status: str = "ok"):
     conn = pg_connect()
     with conn.cursor() as cur:
-        cur.execute("INSERT INTO agent_runs(agent, status) VALUES (%s,%s)", (agent, status))
+        cur.execute(
+            "INSERT INTO agent_runs(agent, status) VALUES (%s,%s)",
+            (agent, status),
+        )
 
 def latest_trend_snapshot(symbol: str) -> Optional[dict]:
     """Latest trend_score details JSON for a symbol."""
     conn = pg_connect()
     with conn.cursor() as cur:
-        cur.execute("""
-          SELECT details FROM findings
-          WHERE symbol=%s AND agent='trend_score'
-          ORDER BY ts_utc DESC LIMIT 1
-        """, (symbol,))
+        cur.execute(
+            "SELECT details FROM findings "
+            "WHERE symbol=%s AND agent='trend_score' "
+            "ORDER BY ts_utc DESC LIMIT 1",
+            (symbol,),
+        )
         row = cur.fetchone()
     return row[0] if row else None
 
