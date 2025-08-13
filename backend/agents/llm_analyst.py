@@ -13,6 +13,7 @@ from ..db import latest_trend_snapshot  # keep if you have this
 from ..state import trades as STATE_TRADES
 from .. import state  # <-- import the module so we can call state.get_position
 from .base import Agent
+import re, json, asyncio, httpx, time
 
 
 class LLMAnalystAgent(Agent):
@@ -88,22 +89,14 @@ class LLMAnalystAgent(Agent):
         ]
 
 def _normalize_tweaks(t):
-    """
-    Accepts list/dict/str and returns a short list of human-friendly strings.
-    Prevents 'unhashable type: slice' by never slicing a dict.
-    """
     out = []
-    if t is None:
-        return out
-    # If the model sends a dict like {"monitor":"...", "risk_management":"..."}
+    if t is None: return out
     if isinstance(t, dict):
         for k, v in list(t.items())[:8]:
             out.append(f"{str(k)}: {str(v)}")
         return out[:5]
-    # If it sends a single string
     if isinstance(t, str):
         return [t][:5]
-    # If it's a list, support either strings or {param,delta,reason}
     if isinstance(t, list):
         for item in t:
             if isinstance(item, dict):
@@ -120,10 +113,8 @@ def _normalize_tweaks(t):
                         s += f" — {reason}"
                     out.append(s)
             elif isinstance(item, str):
-                m = re.match(r"\s*([A-Za-z0-9_.:-]+)\s*:\s*([+\-]?\d+(?:\.\d+)?)", item)
-                out.append(item if not m else f"{m.group(1)}: {m.group(2)}")
+                out.append(item)
         return out[:5]
-    # Anything else → stringified and clipped
     out.append(str(t))
     return out[:5]
 
@@ -164,7 +155,7 @@ async def run_once(self, symbol) -> Optional[dict]:
 
         rationale = str(data.get("rationale") or "").strip()
         tweaks = _normalize_tweaks(data.get("tweaks"))
-
+        
         finding = {
             "score": round(confidence * 10.0, 2),
             "label": "llm_analysis",
@@ -172,9 +163,10 @@ async def run_once(self, symbol) -> Optional[dict]:
                 "action": action,
                 "confidence": round(confidence, 2),
                 "rationale": rationale[:600],
-                "tweaks": tweaks,
+                "tweaks": tweaks,  # always a short list of strings
             },
         }
+
 
         # Optional Slack ping
         if ALERT_WEBHOOK_URL and confidence >= self.alert_min_conf:
