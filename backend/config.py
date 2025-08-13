@@ -24,11 +24,15 @@ LLM_ANALYST_MIN_SCORE = float(os.getenv("LLM_ANALYST_MIN_SCORE", "3.0"))
 LLM_USE_PROXY = os.getenv("LLM_USE_PROXY", "false").lower() == "true"
 LLM_IGNORE_PROXY = os.getenv("LLM_IGNORE_PROXY", "true").lower() == "true"
 
-#Macro watcher
-MACRO_WINDOWS=12:30,14:00
-MACRO_WINDOW_MINUTES=10
-MACRO_RVOL_MIN=1.3
-MACRO_INTERVAL_SEC=60
+# --- Macro watcher (env-driven, resilient parsing) ---
+# Example env: MACRO_WINDOWS="12:30,14:00,18:00"
+MACRO_WINDOWS_STR = os.getenv("MACRO_WINDOWS", "12:30,14:00")
+MACRO_WINDOWS = [w.strip() for w in MACRO_WINDOWS_STR.split(",") if w.strip()]
+
+MACRO_WINDOW_MINUTES = int(os.getenv("MACRO_WINDOW_MINUTES", "10"))
+MACRO_RVOL_MIN       = float(os.getenv("MACRO_RVOL_MIN", "1.3"))
+MACRO_INTERVAL_SEC   = int(os.getenv("MACRO_INTERVAL_SEC", "60"))
+
 
 # Agents thresholds
 ALERT_MIN_RVOL = float(os.getenv("ALERT_MIN_RVOL", "5.0"))
