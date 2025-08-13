@@ -54,51 +54,60 @@ class LLMAnalystAgent(Agent):
         return [{"role":"system","content":sys},
                 {"role":"user","content":"Context:\n" + json.dumps(ctx)[: self.max_tokens*3] + "\nReturn JSON only."}]
 
-    async def run_once(self, symbol: str) -> Optional[dict]:
-        if not self._client:
-            return None
-        ctx = await self._gather(symbol)
-        msgs = self._prompt(ctx)
+async def run_once(self, symbol) -> Optional[dict]:
+    # PRE-FLIGHT: never be silent
+    if not self.enabled:
+        return {
+            "score": 0.0,
+            "label": "llm_skipped",
+            "details": {"reason": self.disable_reason or "disabled"}
+        }
+    if self._client is None:
+        return {
+            "score": 0.0,
+            "label": "llm_skipped",
+            "details": {"reason": "no_client"}
+        }
 
-        raw = None
-        try:
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(
-                None,
-                lambda: self._client.chat.completions.create(
-                    model=self.model, messages=msgs, response_format={"type":"json_object"},
-                    temperature=0.2, max_tokens=600
-                )
+    ctx = await self._gather_context(symbol)
+    # (tip) filter noisy error findings from ctx if you want
+    msgs, _schema = self._prompt(ctx)
+
+    raw = None
+    try:
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._client.chat.completions.create(
+                model=self.model,
+                messages=msgs,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=600,
             )
-            raw = resp.choices[0].message.content or "{}"
-            data = json.loads(raw)
-            action = (data.get("action") or "observe").strip()
-            confidence = float(data.get("confidence") or 0.0)
-            rationale = str(data.get("rationale") or "").strip()
-            tweaks = data.get("tweaks") or []
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
 
-            # Clamp with trend_snapshot
-            snap = ctx.get("trend_snapshot") or {}
-            p_up = snap.get("p_up"); p5=snap.get("p_5m"); p15=snap.get("p_15m")
-            entry_min_rvol = float(__import__('os').getenv("LLM_ENTRY_MIN_RVOL","1.20"))
-            rvol = (ctx["signals"].get("rvol_vs_recent") or 0.0) or 0.0
-            if action == "consider-entry":
-                if (ctx["signals"].get("dcvd_2m",0) < 0) or (ctx["signals"].get("mom1_bps",0) <= -8) or (rvol < float(entry_min_rvol)) or (p_up is not None and p_up < 0.55):
-                    action, confidence = "observe", min(confidence, 0.40)
-                if (p5 is not None and p15 is not None) and (p5 < 0.55 and p15 < 0.55):
-                    action, confidence = "observe", min(confidence, 0.40)
-            if action == "consider-exit":
-                if (ctx["signals"].get("dcvd_2m",0) > 0 and ctx["signals"].get("mom1_bps",0) > 0 and rvol >= 1.0) and (p_up is not None and p_up > 0.60):
-                    action, confidence = "observe", min(confidence, 0.40)
+        action = (data.get("action") or "observe").strip()
+        confidence = float(data.get("confidence") or 0.0)
+        confidence = max(0.0, min(1.0, confidence))
+        rationale = str(data.get("rationale") or "").strip()
+        tweaks = data.get("tweaks") or []
 
-            finding = {"score": max(0.0, min(10.0, confidence*10.0)),
-                       "label":"llm_analysis",
-                       "details":{"action":action,"confidence":confidence,"rationale":rationale[:600],"tweaks":tweaks[:5]}}
+        finding = {
+            "score": round(confidence * 10.0, 2),
+            "label": "llm_analysis",
+            "details": {
+                "action": action,
+                "confidence": confidence,
+                "rationale": rationale[:600],
+                "tweaks": tweaks[:5],
+            },
+        }
+        return finding
 
-            if ALERT_WEBHOOK_URL and not SLACK_ANALYSIS_ONLY and confidence >= self.alert_min_conf:
-                await post_webhook({"text": f"🧠 {symbol} {action} ({confidence:.2f}) — {rationale[:160]}"})
-            return finding
-        except Exception as e:
-            det = {"error": f"{type(e).__name__}: {str(e)[:180]}"}
-            if raw: det["raw"] = raw[:300]
-            return {"score": 0.0, "label":"llm_error", "details": det}
+    except Exception as e:
+        det = {"error": f"{type(e).__name__}: {str(e)[:180]}"}
+        if raw:
+            det["raw"] = raw[:400]
+        return {"score": 0.0, "label": "llm_error", "details": det}
