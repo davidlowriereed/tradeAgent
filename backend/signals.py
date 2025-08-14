@@ -2,6 +2,8 @@
 import time, math
 from typing import List
 from .state import trades, best_px
+# backend/signals.py
+from .state import trades, cvd, best_bid, best_ask
 
 def _mom_bps(win: list) -> float:
     if not win: return 0.0
