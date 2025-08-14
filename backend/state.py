@@ -20,17 +20,22 @@ trades = defaultdict(lambda: deque(maxlen=50_000))
 # Latest quoted bests
 _best_px = defaultdict(lambda: {"bid": None, "ask": None})
 
-def record_trade(symbol: str, price: float, size: float, side: str,
-                 bid: float | None = None, ask: float | None = None,
-                 ts: float | None = None):
-    """Append a trade and keep latest best bid/ask if provided."""
-    ts = ts or time.time()
-    trades[symbol].append((ts, float(price), float(size), side, bid, ask))
-    if bid is not None:
-        _best_px[symbol]["bid"] = float(bid)
-    if ask is not None:
-        _best_px[symbol]["ask"] = float(ask)
+def record_trade(*, symbol: str, price: float, size: float, side: str,
+                 bid: float|None = None, ask: float|None = None,
+                 ts: float|None = None):
+    """Append trade and (optionally) update best bid/ask."""
+    lst = trades[symbol]
+    lst.append({"ts": ts or time.time(), "price": float(price), "size": float(size), "side": side})
+    # keep a reasonable cap so memory doesn’t balloon
+    if len(lst) > 5000:
+        del lst[:len(lst)-4000]
 
+    # <- this is the critical line for quotes
+    if bid is not None and ask is not None:
+        _best_quotes[symbol] = (float(bid), float(ask))
+
+def get_best_quote(symbol: str) -> tuple[float|None, float|None]:
+    return _best_quotes.get(symbol, (None, None))
 def best_px(symbol: str) -> tuple[float | None, float | None]:
     b = _best_px[symbol]
     return b["bid"], b["ask"]
