@@ -12,6 +12,7 @@ from .scheduler import agents_loop, AGENTS
 from .services.market import market_loop
 from . import state as pos_state
 from fastapi import Query
+import time, traceback
 
 # --- CREATE APP FIRST ---
 app = FastAPI()
@@ -24,6 +25,24 @@ except Exception:
     # Fine if you haven't added github_webhook.py yet
     pass
 
+def _num(x, default=0.0):
+    try:
+        v = float(x)
+        return v if (v == v and v not in (float("inf"), float("-inf"))) else default
+    except Exception:
+        return default
+
+# Build info (helps confirm you’re actually on the latest deploy)
+@app.get("/version")
+async def version():
+    import os
+    return {
+        "git_sha": os.getenv("GIT_SHA", ""),
+        "build_time": os.getenv("BUILD_TIME", ""),
+        "mode": os.getenv("MODE", "realtime"),
+    }
+
+
 # Ensure DB schema on startup (safer to do it here than at import time)
 @app.on_event("startup")
 async def _startup():
@@ -34,24 +53,39 @@ async def _startup():
 
 # ----- Routes -----
 
+# Observe the live state (trades and bars)
 @app.get("/debug/state")
 async def debug_state(symbol: str = Query(...)):
     from .state import trades, quotes
     from .bars import build_bars
-    import time
-
     rows = list(trades.get(symbol, []))
-    bars1 = build_bars(symbol, tf="1m", lookback_min=45)
-    last_ts = rows[-1][0] if rows else None
-    age_s = (time.time() - last_ts) if last_ts else None
-
+    last = rows[-1] if rows else None
+    age_s = (time.time() - last[0]) if last else None
+    bars1 = build_bars(symbol, "1m", 60)
     return {
         "symbol": symbol,
         "trades_cached": len(rows),
-        "last_trade": rows[-1] if rows else None,     # [ts, price, size, side]
-        "last_trade_age_s": round(age_s, 2) if age_s is not None else None,
+        "last_trade": last,                  # [ts, price, size, side]
+        "last_trade_age_s": round(age_s, 3) if age_s is not None else None,
         "bars_1m_count": len(bars1),
         "bars_1m_tail": bars1[-3:],
+    }
+
+# Compute features directly (no agents/env thresholds)
+@app.get("/debug/features")
+async def debug_features(symbol: str = Query(...)):
+    from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
+    b1  = build_bars(symbol, "1m", 60)
+    b5  = build_bars(symbol, "5m", 240)
+    b15 = build_bars(symbol, "15m", 480)
+    return {
+        "symbol": symbol,
+        "bars": {"1m": len(b1), "5m": len(b5), "15m": len(b15)},
+        "mom_bps_1m":        _num(momentum_bps(b1, 1)),
+        "mom_bps_5m":        _num(momentum_bps(b5, 1)),
+        "mom_bps_15m":       _num(momentum_bps(b15,1)),
+        "px_vs_vwap_bps_1m": _num(px_vs_vwap_bps(b1, 20)),
+        "atr_1m":            _num(atr(b1, 14)),
     }
     
 @app.get("/signals_tf")
@@ -156,16 +190,40 @@ async def run_now(names: str | None = None, agent: str | None = None, symbol: st
 
 
 # --- Added lightweight data endpoints for dashboard ---
+# Hardened signals_tf: never starve the UI
 @app.get("/signals_tf")
-async def signals_tf(symbol: str = Query(..., description="Symbol, e.g., BTC-USD")):
-    # Import locally to avoid top-level churn
+async def signals_tf(symbol: str = Query(...)):
     from .signals import compute_signals_tf
     try:
-        out = compute_signals_tf(symbol, ["1m","5m","15m"])
-        out["symbol"] = symbol
-        return out
+        tf = compute_signals_tf(symbol, ["1m", "5m", "15m"]) or {}
     except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "symbol": symbol}
+        from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
+        b1  = build_bars(symbol, "1m", 60)
+        b5  = build_bars(symbol, "5m", 240)
+        b15 = build_bars(symbol, "15m", 480)
+        tf = {
+            "mom_bps_1m":        momentum_bps(b1, 1),
+            "mom_bps_5m":        momentum_bps(b5, 1),
+            "mom_bps_15m":       momentum_bps(b15,1),
+            "px_vs_vwap_bps_1m": px_vs_vwap_bps(b1, 20),
+            "atr_1m":            atr(b1, 14),
+            "_fallback_error": f"{type(e).__name__}: {e}",
+        }
+    return {
+        "symbol": symbol,
+        "mom_bps_1m":         _num(tf.get("mom_bps_1m")),
+        "mom_bps_5m":         _num(tf.get("mom_bps_5m")),
+        "mom_bps_15m":        _num(tf.get("mom_bps_15m")),
+        "px_vs_vwap_bps_1m":  _num(tf.get("px_vs_vwap_bps_1m")),
+        "px_vs_vwap_bps_5m":  _num(tf.get("px_vs_vwap_bps_5m")),
+        "px_vs_vwap_bps_15m": _num(tf.get("px_vs_vwap_bps_15m")),
+        "rvol_1m":            _num(tf.get("rvol_1m")),
+        "rvol_5m":            _num(tf.get("rvol_5m")),
+        "rvol_15m":           _num(tf.get("rvol_15m")),
+        "atr_1m":             _num(tf.get("atr_1m")),
+        "atr_5m":             _num(tf.get("atr_5m")),
+        "atr_15m":            _num(tf.get("atr_15m")),
+    }
 
 @app.get("/liquidity")
 async def liquidity_state():
