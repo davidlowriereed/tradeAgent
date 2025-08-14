@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Deque, Dict, Optional, Tuple, Any
 from .db import pg_exec, pg_fetchone
-
+import time
 # ------------------------------
 # Realtime market state (feeds)
 # ------------------------------
@@ -14,6 +14,26 @@ trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=10_000))
 cvd: Dict[str, float] = defaultdict(float)
 best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
 best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
+# Recent trades per symbol: (ts, price, size, side, bid, ask)
+trades = defaultdict(lambda: deque(maxlen=50_000))
+
+# Latest quoted bests
+_best_px = defaultdict(lambda: {"bid": None, "ask": None})
+
+def record_trade(symbol: str, price: float, size: float, side: str,
+                 bid: float | None = None, ask: float | None = None,
+                 ts: float | None = None):
+    """Append a trade and keep latest best bid/ask if provided."""
+    ts = ts or time.time()
+    trades[symbol].append((ts, float(price), float(size), side, bid, ask))
+    if bid is not None:
+        _best_px[symbol]["bid"] = float(bid)
+    if ask is not None:
+        _best_px[symbol]["ask"] = float(ask)
+
+def best_px(symbol: str) -> tuple[float | None, float | None]:
+    b = _best_px[symbol]
+    return b["bid"], b["ask"]
 
 def best_px(symbol: str) -> Tuple[Optional[float], Optional[float]]:
     return best_bid.get(symbol), best_ask.get(symbol)
