@@ -19,15 +19,15 @@ def build_bars(symbol: str, tf: str = "1m", lookback_min: int = 60) -> List[dict
 
     for ts, price, size, side in rows:
     # convert ms → sec if needed
-    if ts and ts > 1e12:
-        ts = ts / 1000.0
-    try:
-        price = float(price)
-        size  = float(size)
+        if ts and ts > 1e12:
+            ts = ts / 1000.0
+        try:
+            price = float(price)
+            size  = float(size)
     except (TypeError, ValueError):
         continue
-    if ts < start:
-        continue
+        if ts < start:
+            continue
 
         b = _bucket(ts, sec)
         row = buckets.get(b)
