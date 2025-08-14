@@ -26,4 +26,4 @@ spec:
 
         - key: SYMBOL
           scope: RUN_AND_BUILD_TIME
-          value: "BTC-USD"
+          value: "ADA-USD"
