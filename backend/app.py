@@ -83,6 +83,21 @@ async def signals(symbol: str = Query(...)):
             pass
     return out
 
+@app.get("/debug/state")
+async def debug_state(symbol: str = Query(...)):
+    from .state import trades, quotes
+    from .bars import build_bars
+    rows = list(trades.get(symbol, []))
+    bars = build_bars(symbol, tf="1m", lookback_min=30)
+    return {
+        "symbol": symbol,
+        "trades_cached": len(rows),
+        "last_trade": rows[-1] if rows else None,  # [ts, price, size, side]
+        "bars_1m_count": len(bars),
+        "bars_1m_tail": bars[-3:],
+    }
+
+
 @app.get("/findings")
 async def findings(symbol: str | None = None, limit: int = 50):
     return {"findings": fetch_findings(symbol, limit)}
