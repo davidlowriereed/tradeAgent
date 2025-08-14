@@ -49,11 +49,12 @@ async def root():
             f"<pre style='color:#b00'>index error: {e}</pre>"
         )
 
-@app.get("/signals")
-async def signals(symbol: str = Query(default=SYMBOLS[0])):
-    sig = compute_signals(symbol)
-    sig["symbol"] = symbol
-    return sig
+@app.get("/signals_tf")
+async def signals_tf(symbol: str):
+    from .signals import compute_signals_tf
+    out = compute_signals_tf(symbol, ["1m", "5m", "15m"])
+    out["symbol"] = symbol
+    return out
 
 @app.get("/findings")
 async def findings(symbol: str | None = None, limit: int = 50):
@@ -163,10 +164,6 @@ async def signals_tf(symbol: str = Query(..., description="Symbol, e.g., BTC-USD
 
 @app.get("/liquidity")
 async def liquidity_state():
-    try:
-        from .liquidity import get_liquidity_state
-        risk_on, score = get_liquidity_state()
-        return {"risk_on": bool(risk_on), "liquidity_score": float(score)}
-    except Exception as e:
-        return {"risk_on": False, "liquidity_score": 0.0, "error": f"{type(e).__name__}: {e}"}
-
+    from .liquidity import get_liquidity_state
+    risk_on, score = get_liquidity_state()
+    return {"risk_on": bool(risk_on), "liquidity_score": float(score)}
