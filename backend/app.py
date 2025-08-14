@@ -14,6 +14,7 @@ import os
 import io
 import csv
 import json
+import math
 import time
 import asyncio
 import traceback
@@ -58,7 +59,7 @@ except Exception:
 def _num(x, default=0.0):
     try:
         v = float(x)
-        return v if (v == v and v not in (float("inf"), float("-inf"))) else default
+        return v if math.isfinite(v) else default
     except Exception:
         return default
 
@@ -111,27 +112,51 @@ async def root():
 
 @app.get("/signals")
 async def signals(symbol: str = Query(...)):
+    """
+    Stable JSON for the header/footer cards. All numeric fields are guaranteed finite.
+    Quotes are synthesized from last price if the feed hasn't sent bid/ask yet.
+    """
     from .signals import compute_signals
-    from .state import trades
+    from .state import get_best_quotes, get_last_price, trades
+
     sig = compute_signals(symbol) or {}
+
     out = {
         "symbol": symbol,
         "mom1_bps":       _num(sig.get("mom1_bps")),
         "mom5_bps":       _num(sig.get("mom5_bps")),
         "rvol_vs_recent": _num(sig.get("rvol_vs_recent")),
         "px_vs_vwap_bps": _num(sig.get("px_vs_vwap_bps")),
-        "best_bid": sig.get("best_bid"),
-        "best_ask": sig.get("best_ask"),
-        "trades_cached": len(list(trades.get(symbol, []))),
+        "best_bid":       sig.get("best_bid"),
+        "best_ask":       sig.get("best_ask"),
+        "last_price":     sig.get("last_price"),
+        "trades_cached":  len(list(trades.get(symbol, []))),
     }
-    # synthesize quotes if missing (optional)
-    if out["best_bid"] is None and out["best_ask"] is None:
-        try:
-            lp = float(sig.get("last_price"))
-            out["best_bid"] = round(lp * 0.9998, 2)
-            out["best_ask"] = round(lp * 1.0002, 2)
-        except Exception:
-            pass
+
+    # Backfill quotes if missing or non-numeric
+    bb = out["best_bid"]; ba = out["best_ask"]
+    if not isinstance(bb, (int, float)): bb = None
+    if not isinstance(ba, (int, float)): ba = None
+
+    if bb is None or ba is None:
+        q = get_best_quotes(symbol)
+        if q:
+            qb, qa = q
+            if isinstance(qb, (int, float)): bb = qb
+            if isinstance(qa, (int, float)): ba = qa
+
+    if bb is None or ba is None:
+        lp = out["last_price"]
+        if not isinstance(lp, (int, float)):
+            lp = get_last_price(symbol)
+        if isinstance(lp, (int, float)):
+            # synthesize a tiny spread so the UI has something useful
+            bb = round(lp * 0.9998, 2)
+            ba = round(lp * 1.0002, 2)
+
+    out["best_bid"] = bb
+    out["best_ask"] = ba
+
     return out
 
 
