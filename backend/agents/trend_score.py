@@ -39,18 +39,19 @@ class TrendScoreAgent(Agent):
         z = w["bias"] + w["w_dcvd"]*_tanh(dcvd,1500) + w["w_rvol"]*_tanh((rvol-1.0),0.5) - w["w_rvratio"]*_tanh((rvratio-1.0),0.3) + w["w_vwap"]*_tanh(px_vs_vwap_bps,12.0) + w["w_mom"]*_tanh(mom_bps,10.0)
         return _sigmoid(z)
 
-    def run_once(self, symbol: str) -> Optional[dict]:
+def run_once(self, symbol: str) -> Optional[dict]:
     now = time.time()
+
+    # --- bar-based path ---
     if FEATURE_BARS:
         try:
-            tf = compute_signals_tf(symbol, ["1m", "5m", "15m"])  # bar-based features
+            tf = compute_signals_tf(symbol, ["1m", "5m", "15m"])
             mom1 = float(tf.get("mom_bps_1m", 0.0) or 0.0)
             mom5 = float(tf.get("mom_bps_5m", 0.0) or 0.0)
             mom15 = float(tf.get("mom_bps_15m", 0.0) or 0.0)
             px_vwap_bps = float(tf.get("px_vs_vwap_bps_1m", 0.0) or 0.0)
             rvol = float(tf.get("rvol_5m", 0.0) or 0.0)
 
-            # Use the existing calibrated helper; feed sane defaults only
             p1  = self._hprob(mom1, rvol, rvol, px_vwap_bps, mom1)
             p5  = self._hprob(mom5, rvol, rvol, px_vwap_bps, mom5)
             p15 = self._hprob(mom15, rvol, rvol, px_vwap_bps, mom5 * 0.6)
@@ -68,10 +69,10 @@ class TrendScoreAgent(Agent):
                 },
             }
         except Exception:
-            # fall back to legacy path if bars aren’t ready yet
+            # bars not ready → try legacy below
             pass
 
-    # --- legacy path (unchanged) ---
+    # --- legacy path (unchanged core logic; just cast safely) ---
     sig = compute_signals(symbol)
     mom1 = float(sig.get("mom1_bps", 0.0) or 0.0)
     mom5 = float(sig.get("mom5_bps", 0.0) or 0.0)
@@ -94,3 +95,4 @@ class TrendScoreAgent(Agent):
             "p_15m": round(p15, 4),
         },
     }
+
