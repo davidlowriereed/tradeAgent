@@ -1,7 +1,7 @@
 # backend/app.py
 import os, io, csv, json, asyncio, httpx
-from fastapi import FastAPI, Query, Body
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, Query, Body, Request
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from .config import SYMBOLS
 from .signals import compute_signals
 from .db import (
@@ -11,11 +11,30 @@ from .db import (
 from .scheduler import agents_loop, AGENTS
 from .services.market import market_loop
 from . import state as pos_state
-from fastapi import Query
 import time, traceback
 
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
 # --- CREATE APP FIRST ---
-app = FastAPI()
+app = FastAPI(title="Opportunity Radar")
+
+# --- template + static mounting ---
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+# --- root: serve the dashboard ---
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    # index.html must live at backend/templates/index.html
+    return templates.TemplateResponse("index.html", {"request": request})
 
 # Optional: include GitHub webhook router if present
 try:
@@ -52,6 +71,28 @@ async def _startup():
     asyncio.create_task(agents_loop(), name="agents_loop")
 
 # ----- Routes -----
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    here = os.path.dirname(__file__)
+    index_path = os.path.join(here, "templates", "index.html")
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    except Exception as e:
+        return HTMLResponse(
+            "<h3>Opportunity Radar (Alpha)</h3>"
+            "<p>See <a href='/signals'>/signals</a>, "
+            "<a href='/findings'>/findings</a>, "
+            "<a href='/health'>/health</a></p>"
+            f"<pre style='color:#b00'>index error: {e}</pre>"
+        )
+
+@app.get("/signals")
+async def signals(symbol: str = Query(default=SYMBOLS[0])):
+    sig = compute_signals(symbol)
+    sig["symbol"] = symbol
+    return sig
 
 # Observe the live state (trades and bars)
 @app.get("/debug/state")
