@@ -11,6 +11,7 @@ from .db import (
 from .scheduler import agents_loop, AGENTS
 from .services.market import market_loop
 from . import state as pos_state
+import traceback
 
 # --- CREATE APP FIRST ---
 app = FastAPI()
@@ -193,25 +194,77 @@ async def run_now(names: str | None = None, agent: str | None = None, symbol: st
 
 
 # --- Added lightweight data endpoints for dashboard ---
+def _num(x, default=0.0):
+    try:
+        v = float(x)
+        if v != v or v in (float("inf"), float("-inf")):
+            return default
+        return v
+    except Exception:
+        return default
+
 @app.get("/signals_tf")
 async def signals_tf(symbol: str = Query(...)):
-    from .signals import compute_signals_tf
-    tf = compute_signals_tf(symbol, ["1m","5m","15m"]) or {}
-    return {
-        "symbol": symbol,
-        "mom_bps_1m":        _num(tf.get("mom_bps_1m")),
-        "mom_bps_5m":        _num(tf.get("mom_bps_5m")),
-        "mom_bps_15m":       _num(tf.get("mom_bps_15m")),
-        "px_vs_vwap_bps_1m": _num(tf.get("px_vs_vwap_bps_1m")),
-        "px_vs_vwap_bps_5m": _num(tf.get("px_vs_vwap_bps_5m")),
-        "px_vs_vwap_bps_15m":_num(tf.get("px_vs_vwap_bps_15m")),
-        "rvol_1m":           _num(tf.get("rvol_1m")),
-        "rvol_5m":           _num(tf.get("rvol_5m")),
-        "rvol_15m":          _num(tf.get("rvol_15m")),
-        "atr_1m":            _num(tf.get("atr_1m")),
-        "atr_5m":            _num(tf.get("atr_5m")),
-        "atr_15m":           _num(tf.get("atr_15m")),
-    }
+    """
+    Returns bar-based features for the dashboard.
+    Never throws; always returns numeric fields (0.0 fallback).
+    """
+    # Primary path: use your existing compute_signals_tf
+    try:
+        from .signals import compute_signals_tf
+        tf = compute_signals_tf(symbol, ["1m","5m","15m"]) or {}
+        return {
+            "symbol": symbol,
+            "mom_bps_1m":        _num(tf.get("mom_bps_1m")),
+            "mom_bps_5m":        _num(tf.get("mom_bps_5m")),
+            "mom_bps_15m":       _num(tf.get("mom_bps_15m")),
+            "px_vs_vwap_bps_1m": _num(tf.get("px_vs_vwap_bps_1m")),
+            "px_vs_vwap_bps_5m": _num(tf.get("px_vs_vwap_bps_5m")),
+            "px_vs_vwap_bps_15m":_num(tf.get("px_vs_vwap_bps_15m")),
+            "rvol_1m":           _num(tf.get("rvol_1m")),
+            "rvol_5m":           _num(tf.get("rvol_5m")),
+            "rvol_15m":          _num(tf.get("rvol_15m")),
+            "atr_1m":            _num(tf.get("atr_1m")),
+            "atr_5m":            _num(tf.get("atr_5m")),
+            "atr_15m":           _num(tf.get("atr_15m")),
+        }
+    except Exception as e:
+        # Fallback path: compute minimal features directly from bars (no env thresholds)
+        try:
+            from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
+            b1 = build_bars(symbol, tf="1m",  lookback_min=60)
+            b5 = build_bars(symbol, tf="5m",  lookback_min=240)
+            b15= build_bars(symbol, tf="15m", lookback_min=480)
+
+            return {
+                "symbol": symbol,
+                "mom_bps_1m":        _num(momentum_bps(b1, lookback=1)),
+                "mom_bps_5m":        _num(momentum_bps(b5, lookback=1)),
+                "mom_bps_15m":       _num(momentum_bps(b15,lookback=1)),
+                "px_vs_vwap_bps_1m": _num(px_vs_vwap_bps(b1, window=20)),
+                "px_vs_vwap_bps_5m": _num(px_vs_vwap_bps(b5, window=20)),
+                "px_vs_vwap_bps_15m":_num(px_vs_vwap_bps(b15,window=20)),
+                "rvol_1m":           0.0,  # not needed by UI; keep numeric
+                "rvol_5m":           0.0,
+                "rvol_15m":          0.0,
+                "atr_1m":            _num(atr(b1, 14)),
+                "atr_5m":            _num(atr(b5, 14)),
+                "atr_15m":           _num(atr(b15,14)),
+                "fallback": True,
+                "error": f"{type(e).__name__}: {e}",
+                "trace_tail": traceback.format_exc(limit=3).splitlines()[-3:],
+            }
+        except Exception as e2:
+            # Absolute last resort: return zeros, but never crash the page
+            return {
+                "symbol": symbol, "mom_bps_1m":0.0,"mom_bps_5m":0.0,"mom_bps_15m":0.0,
+                "px_vs_vwap_bps_1m":0.0,"px_vs_vwap_bps_5m":0.0,"px_vs_vwap_bps_15m":0.0,
+                "rvol_1m":0.0,"rvol_5m":0.0,"rvol_15m":0.0,
+                "atr_1m":0.0,"atr_5m":0.0,"atr_15m":0.0,
+                "fallback": True,
+                "error": f"{type(e).__name__}: {e}",
+                "fallback_error": f"{type(e2).__name__}: {e2}",
+            }
 
 @app.get("/liquidity")
 async def liquidity_state():
