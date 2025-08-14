@@ -2,6 +2,19 @@
 import time, math, statistics
 from typing import List, Tuple, Optional, Dict, Any
 from .state import trades, best_px, get_best_quote
+from .bars import build_bars, momentum_bps, px_vs_vwap_bps, rvol_ratio
+
+out = {
+  "mom_bps_1m":         _num(momentum_bps(b1, 1)),
+  "mom_bps_5m":         _num(momentum_bps(b5, 1)),
+  "mom_bps_15m":        _num(momentum_bps(b15,1)),
+  "px_vs_vwap_bps_1m":  _num(px_vs_vwap_bps(b1, 20)),
+  "px_vs_vwap_bps_5m":  _num(px_vs_vwap_bps(b5, 20)),
+  "px_vs_vwap_bps_15m": _num(px_vs_vwap_bps(b15,20)),
+  "rvol_1m":            _num(rvol_ratio(b1, 5, 20)),
+  "rvol_5m":            _num(rvol_ratio(b5, 5, 20)),
+  "rvol_15m":           _num(rvol_ratio(b15,5, 20)),
+}
 
 def _num(x, default=0.0) -> float:
     try:
