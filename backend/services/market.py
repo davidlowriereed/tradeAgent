@@ -4,6 +4,7 @@ import websockets
 from typing import Optional
 from ..config import SYMBOLS
 from ..state import trades, best_px, record_trade
+import asyncio, random
 
 record_trade(
     symbol=symbol,
@@ -15,32 +16,33 @@ record_trade(
     ts=event_ts_in_seconds   # optional
 )
 
-def _f(x):
-    try: return float(x)
-    except: return None
-
 async def market_loop():
+    """
+    Connect to your real feed here. This stub just keeps the app healthy and the
+    /signals endpoint populated. Replace the inner block with your exchange
+    handler, but keep calls to record_trade(...) inside this function.
+    """
+    last = {s: 100.0 for s in SYMBOLS}  # seed prices so bid/ask aren't null
     while True:
-        try:
-            uri = "wss://ws-feed.exchange.coinbase.com"
-            sub = {"type":"subscribe","channels":[{"name":"ticker","product_ids":SYMBOLS}]}
-            async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as ws:
-                await ws.send(json.dumps(sub))
-                while True:
-                    msg = json.loads(await ws.recv())
-                    if msg.get("type") != "ticker": continue
-                    sym = msg.get("product_id")
-                    if sym not in trades: continue
+        now = time.time()
+        for sym in SYMBOLS:
+            # --- BEGIN: dev stub (replace with your real feed events) ---
+            last[sym] += random.uniform(-0.05, 0.05)
+            price = last[sym]
+            bid = price - 0.01
+            ask = price + 0.01
+            size = random.uniform(0.05, 1.0)
+            side = "buy" if random.random() > 0.5 else "sell"
+            # --- END: dev stub ---
 
-                    ts = time.time()
-                    px = _f(msg.get("price")) or _f(msg.get("best_bid")) or _f(msg.get("best_ask"))
-                    size = _f(msg.get("last_size")) or 0.0
-                    side = msg.get("side")
-
-                    if px: trades[sym].append((ts, px, size, side))
-                    bb, ba = _f(msg.get("best_bid")), _f(msg.get("best_ask"))
-                    if bb or ba:
-                        obb, oba = best_px.get(sym, (None, None))
-                        best_px[sym] = (bb or obb, ba or oba)
-        except Exception:
-            await asyncio.sleep(2.0)
+            # Keep state updated for /signals (CVD + best bid/ask)
+            record_trade(
+                symbol=sym,
+                price=price,
+                size=size,
+                side=side,
+                bid=bid,
+                ask=ask,
+                ts=now,
+            )
+        await asyncio.sleep(0.25)
