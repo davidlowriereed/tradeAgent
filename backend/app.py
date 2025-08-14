@@ -49,11 +49,39 @@ async def root():
             f"<pre style='color:#b00'>index error: {e}</pre>"
         )
 
+def _num(x, default=0.0):
+    try:
+        v = float(x)
+        if v != v or v in (float("inf"), float("-inf")):  # NaN/inf check
+            return default
+        return v
+    except Exception:
+        return default
+
 @app.get("/signals")
-async def signals(symbol: str = Query(default=SYMBOLS[0])):
-    sig = compute_signals(symbol)
-    sig["symbol"] = symbol
-    return sig
+async def signals(symbol: str = Query(...)):
+    from .signals import compute_signals
+    from .state import trades
+    sig = compute_signals(symbol) or {}
+    out = {
+        "symbol": symbol,
+        "mom1_bps":       _num(sig.get("mom1_bps")),
+        "mom5_bps":       _num(sig.get("mom5_bps")),
+        "rvol_vs_recent": _num(sig.get("rvol_vs_recent")),
+        "px_vs_vwap_bps": _num(sig.get("px_vs_vwap_bps")),
+        "best_bid": sig.get("best_bid"),
+        "best_ask": sig.get("best_ask"),
+        "trades_cached": len(list(trades.get(symbol, []))),
+    }
+    # synthesize quote from last_price if bid/ask missing
+    if out["best_bid"] is None and out["best_ask"] is None:
+        try:
+            lp = float(sig.get("last_price"))
+            out["best_bid"] = round(lp * 0.9998, 2)
+            out["best_ask"] = round(lp * 1.0002, 2)
+        except Exception:
+            pass
+    return out
 
 @app.get("/findings")
 async def findings(symbol: str | None = None, limit: int = 50):
@@ -151,15 +179,24 @@ async def run_now(names: str | None = None, agent: str | None = None, symbol: st
 
 # --- Added lightweight data endpoints for dashboard ---
 @app.get("/signals_tf")
-async def signals_tf(symbol: str = Query(..., description="Symbol, e.g., BTC-USD")):
-    # Import locally to avoid top-level churn
+async def signals_tf(symbol: str = Query(...)):
     from .signals import compute_signals_tf
-    try:
-        out = compute_signals_tf(symbol, ["1m","5m","15m"])
-        out["symbol"] = symbol
-        return out
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "symbol": symbol}
+    tf = compute_signals_tf(symbol, ["1m","5m","15m"]) or {}
+    return {
+        "symbol": symbol,
+        "mom_bps_1m":        _num(tf.get("mom_bps_1m")),
+        "mom_bps_5m":        _num(tf.get("mom_bps_5m")),
+        "mom_bps_15m":       _num(tf.get("mom_bps_15m")),
+        "px_vs_vwap_bps_1m": _num(tf.get("px_vs_vwap_bps_1m")),
+        "px_vs_vwap_bps_5m": _num(tf.get("px_vs_vwap_bps_5m")),
+        "px_vs_vwap_bps_15m":_num(tf.get("px_vs_vwap_bps_15m")),
+        "rvol_1m":           _num(tf.get("rvol_1m")),
+        "rvol_5m":           _num(tf.get("rvol_5m")),
+        "rvol_15m":          _num(tf.get("rvol_15m")),
+        "atr_1m":            _num(tf.get("atr_1m")),
+        "atr_5m":            _num(tf.get("atr_5m")),
+        "atr_15m":           _num(tf.get("atr_15m")),
+    }
 
 @app.get("/liquidity")
 async def liquidity_state():
