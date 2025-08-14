@@ -9,3 +9,8 @@ orjson==3.11.1
 ujson==5.10.0
 openai>=1.40.0
 python-dotenv==1.0.1
+MODE={realtime,backtest}
+FEATURE_BARS
+FEATURE_NEW_TREND
+FEATURE_REVERSAL
+FEATURE_LIQUIDITY
