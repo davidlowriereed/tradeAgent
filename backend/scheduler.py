@@ -18,6 +18,7 @@ from .agents.session_reversal import SessionReversalAgent
 from .agents.opening_drive import OpeningDriveReversalAgent
 from .agents.posture_guard import PostureGuardAgent
 from backend.agents.macro_watcher import MacroWatcherAgent
+from datetime import datetime, timezone
 
 AGENTS: list[Agent] = [
     RVOLSpikeAgent(),
@@ -26,6 +27,25 @@ AGENTS: list[Agent] = [
     LLMAnalystAgent(),
 ] + ([SessionReversalAgent(), OpeningDriveReversalAgent()] if FEATURE_REVERSAL else [])
 _last_run_ts: dict[tuple, float] = defaultdict(lambda: 0.0)
+
+def _iso(ts: float | int | None) -> str | None:
+    if not ts or ts <= 0:
+        return None
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+
+def AGENTS_STATE() -> dict:
+    """
+    Summarize agent health for /health.
+    Uses in-memory _last_run_ts; falls back to None if not run yet.
+    """
+    out = {}
+    for agent in AGENTS:
+        last = 0.0
+        # _last_run_ts key is (agent.name, symbol)
+        for sym in SYMBOLS:
+            last = max(last, _last_run_ts.get((agent.name, sym), 0.0))
+        out[agent.name] = {"status": "ok", "last_run": _iso(last)}
+    return out
 
 async def agents_loop():
     while True:
