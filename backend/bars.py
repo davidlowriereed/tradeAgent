@@ -23,8 +23,13 @@ def build_bars(symbol: str, tf: str="1m", lookback_min: int=60) -> List[dict]:
     buckets: Dict[int, dict] = {}
     rows = list(trades.get(symbol, []))
     for ts, price, size, side in rows:
-        if ts < start: 
+        if ts < start_ts:
             continue
+    try:        
+        price = float(price)
+        size  = float(size)
+    except (TypeError, ValueError):
+        continue   # skip malformed tick
         b = _bucket(ts, sec)
         row = buckets.get(b)
         if row is None:
