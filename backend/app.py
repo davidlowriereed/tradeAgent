@@ -63,6 +63,9 @@ def _num(x, default=0.0):
     except Exception:
         return default
 
+def _sigmoid(x: float) -> float:
+    try: return 1/(1+math.exp(-x))
+    except OverflowError: return 0.0 if x < 0 else 1.0
 
 # =========================================================
 # Routes
@@ -109,6 +112,24 @@ async def root():
 # ---------------------------------------------------------
 # Signal endpoints
 # ---------------------------------------------------------
+
+@app.get("/trend_now")
+async def trend_now(symbol: str = Query(...)):
+    from .bars import build_bars, px_vs_vwap_bps, momentum_bps
+    b1  = build_bars(symbol, "1m", 60)
+    b5  = build_bars(symbol, "5m", 240)
+    if not b1:
+        return {"symbol": symbol, "p_up": 0.0, "p_1m": 0.0, "p_5m": 0.0, "p_15m": 0.0, "live": True}
+
+    mom1 = (momentum_bps(b1, 1) or 0.0) / 10
+    mom5 = (momentum_bps(b5, 1) or 0.0) / 10
+    pxv1 = (px_vs_vwap_bps(b1, 20) or 0.0) / 10
+
+    p1  = _sigmoid(0.08*mom1 + 0.03*pxv1)
+    p5  = _sigmoid(0.06*mom5 + 0.03*pxv1)
+    p15 = _sigmoid(0.04*mom5 + 0.02*pxv1)
+    p_up = max(0.0, min(1.0, 0.5*p1 + 0.35*p5 + 0.15*p15))
+    return {"symbol": symbol, "p_up": round(p_up,4), "p_1m": round(p1,4), "p_5m": round(p5,4), "p_15m": round(p15,4), "live": True}
 
 @app.get("/signals")
 async def signals(symbol: str = Query(...)):
