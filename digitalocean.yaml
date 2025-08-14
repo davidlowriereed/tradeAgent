@@ -8,6 +8,22 @@ spec:
       instance_count: 1
       instance_size_slug: basic-xxs
       envs:
+        - key: MODE
+          scope: RUN_TIME
+          value: realtime
+        - key: FEATURE_BARS
+          scope: RUN_TIME
+          value: "true"
+        - key: FEATURE_NEW_TREND
+          scope: RUN_TIME
+          value: "true"
+        - key: FEATURE_REVERSAL
+          scope: RUN_TIME
+          value: "false"
+        - key: FEATURE_LIQUIDITY
+          scope: RUN_TIME
+          value: "false"
+
         - key: SYMBOL
           scope: RUN_AND_BUILD_TIME
           value: "BTC-USD"
