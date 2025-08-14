@@ -4,7 +4,20 @@ from typing import List
 from .state import trades, best_px
 # backend/signals.py
 from .state import trades, cvd, best_bid, best_ask
+import math
 
+def _json_finite(x):
+    return (x if isinstance(x, (int, float)) and math.isfinite(x) else None)
+
+def _sanitize(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float):
+        return _json_finite(obj)
+    return obj
+    
 def _mom_bps(win: list) -> float:
     if not win: return 0.0
     p0 = win[0][1]; p1 = win[-1][1]
@@ -33,13 +46,12 @@ def compute_signals(symbol: str) -> dict:
     w15 = [r for r in buf if r[0] >= now - 900]
 
     bid, ask = best_px.get(symbol, (None, None))
-    return {
-        "cvd": _dcvd(w5),
-        "volume_5m": sum((r[2] or 0.0) for r in w5),
-        "rvol_vs_recent": _rvol(w5, w15),
-        "best_bid": bid,
-        "best_ask": ask,
-        "trades_cached": len(buf),
-        "mom1_bps": _mom_bps(w1),
-        "mom5_bps": _mom_bps(w5),
-    }
+    sig = {
+    "cvd": _json_finite(cvd[symbol]),
+    "volume_5m": _json_finite(vol5),
+    "rvol_vs_recent": _json_finite(rvol),
+    "best_bid": _json_finite(best_bid[symbol]),
+    "best_ask": _json_finite(best_ask[symbol]),
+    "trades_cached": len(trades[symbol]),
+}
+return _sanitize(sig)
