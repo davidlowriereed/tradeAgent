@@ -10,19 +10,22 @@
       --line:#2a2f3a;
     }
     *{box-sizing:border-box}
-    body{margin:16px;font:14px/1.5 system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
-    header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-    h1{font-size:20px;margin:0 8px 0 0}
+    body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
+    header, footer{position:sticky;z-index:5;background:linear-gradient(180deg,var(--bg),#0f1115f0);backdrop-filter: blur(2px);}
+    header{top:0;border-bottom:1px solid var(--line);padding:10px 14px}
+    footer{bottom:0;border-top:1px solid var(--line);padding:10px 14px}
+    .wrap{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    h1{font-size:18px;margin:0 8px 0 0}
     select,button,input{background:#0e1117;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
     button{cursor:pointer}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px;margin:16px 0}
+    main{height:calc(100vh - 178px); /* header + footer approx */ overflow:auto; padding:10px 14px;}
+    .cards{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:10px}
     .card{background:var(--card);border:1px solid var(--line);padding:12px;border-radius:12px;box-shadow:0 0 0 1px rgba(255,255,255,0.02) inset}
     .title{font-weight:600;margin-bottom:6px}
     .muted{color:var(--muted)}
     .big{font-size:24px;font-weight:700}
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
     .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
-    .section{margin:16px 0}
     .pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;border:1px solid var(--line);gap:6px}
     .pill.ok{background:#10291f;border-color:#204d3c;color:#8be8be}
     .pill.bad{background:#321619;border-color:#5b1e26;color:#ff9aa5}
@@ -34,81 +37,84 @@
     .finding:last-child{border-bottom:none}
     a { color: var(--blue); text-decoration: none; }
     a:hover { text-decoration: underline; }
+    .top-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 10px}
   </style>
 </head>
 <body>
-<header>
-  <h1>Opportunity Radar</h1>
-  <label class="muted">Symbol</label>
-  <select id="symbol"></select>
-  <label class="muted">Auto-refresh</label>
-  <select id="refresh">
-    <option value="3">3s</option>
-    <option value="5" selected>5s</option>
-    <option value="10">10s</option>
-    <option value="30">30s</option>
-  </select>
-  <button id="run">Run agents now</button>
-  <span class="muted" id="status"></span>
-  <span style="flex:1"></span>
-  <a id="csv" href="#" class="pill"><span>⬇</span><span>Export CSV</span></a>
-</header>
 
-<section class="grid">
-  <div class="card">
-    <div class="title">Trend Score (p_up)</div>
-    <div class="big mono" id="p_up">—</div>
-    <div class="muted mono" id="p_breakdown">p_1m=— · p_5m=— · p_15m=—</div>
+<header>
+  <div class="wrap">
+    <h1>Opportunity Radar</h1>
+    <label class="muted">Symbol</label>
+    <select id="symbol"></select>
+    <label class="muted">Auto-refresh</label>
+    <select id="refresh">
+      <option value="3">3s</option>
+      <option value="5" selected>5s</option>
+      <option value="10">10s</option>
+      <option value="30">30s</option>
+    </select>
+    <button id="run">Run agents now</button>
+    <span class="muted" id="status"></span>
+    <span style="flex:1"></span>
+    <a id="csv" href="#" class="pill"><span>⬇</span><span>Export CSV</span></a>
   </div>
-  <div class="card">
-    <div class="title">Price vs VWAP (bps)</div>
-    <div class="big mono" id="pxv">—</div>
-    <div class="muted">1m window</div>
-  </div>
-  <div class="card">
-    <div class="title">Momentum</div>
-    <div class="row">
-      <div><div class="muted">1m</div><div class="big mono" id="mom1">—</div></div>
-      <div><div class="muted">5m</div><div class="big mono" id="mom5">—</div></div>
+
+  <div class="cards" style="margin-top:8px">
+    <div class="card">
+      <div class="title">Trend Score (p_up)</div>
+      <div class="big mono" id="p_up">—</div>
+      <div class="muted mono" id="p_breakdown">p_1m=— · p_5m=— · p_15m=—</div>
+    </div>
+    <div class="card">
+      <div class="title">Price vs VWAP (bps)</div>
+      <div class="big mono" id="pxv">—</div>
+      <div class="muted">1m window</div>
+    </div>
+    <div class="card">
+      <div class="title">Momentum</div>
+      <div class="row">
+        <div><div class="muted">1m</div><div class="big mono" id="mom1">—</div></div>
+        <div><div class="muted">5m</div><div class="big mono" id="mom5">—</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="title">RVOL (5 vs 20)</div>
+      <div class="big mono" id="rvol">—</div>
+      <div class="muted">bar-based</div>
     </div>
   </div>
-  <div class="card">
-    <div class="title">RVOL (5 vs 20)</div>
-    <div class="big mono" id="rvol">—</div>
-    <div class="muted">bar-based</div>
-  </div>
-</section>
+</header>
 
-<section class="grid">
-  <div class="card">
-    <div class="title">Top of Book</div>
-    <div class="row mono"><div>Bid</div><div id="bb">—</div></div>
-    <div class="row mono"><div>Ask</div><div id="ba">—</div></div>
-  </div>
-  <div class="card">
-    <div class="title">Trades Cached</div>
-    <div class="big mono" id="cached">0</div>
-  </div>
-  <div class="card">
-    <div class="title">Liquidity (preview)</div>
-    <div id="liq" class="pill"><span>⏳</span><span>Not wired</span></div>
-    <div class="muted">Hook to backend/liquidity.py when available</div>
-  </div>
-  <div class="card">
-    <div class="title">LLM Netcheck</div>
-    <div id="net" class="pill"><span>⏳</span><span>Checking…</span></div>
-  </div>
-</section>
-
-<section class="section">
+<main>
   <div class="title" style="margin:6px 0 8px 4px;">Latest Findings</div>
   <div id="findings"></div>
-</section>
+</main>
 
-<section class="section">
+<footer>
+  <div class="cards">
+    <div class="card">
+      <div class="title">Top of Book</div>
+      <div class="row mono"><div>Bid</div><div id="bb">—</div></div>
+      <div class="row mono"><div>Ask</div><div id="ba">—</div></div>
+    </div>
+    <div class="card">
+      <div class="title">Trades Cached</div>
+      <div class="big mono" id="cached">0</div>
+    </div>
+    <div class="card">
+      <div class="title">Liquidity</div>
+      <div id="liq" class="pill"><span>⏳</span><span>Loading…</span></div>
+    </div>
+    <div class="card">
+      <div class="title">LLM Netcheck</div>
+      <div id="net" class="pill"><span>⏳</span><span>Checking…</span></div>
+    </div>
+  </div>
+
   <div class="title" style="margin:12px 0 8px 4px;">Agent Health</div>
   <div class="health" id="health"></div>
-</section>
+</footer>
 
 <script>
 const $ = sel => document.querySelector(sel);
@@ -135,11 +141,12 @@ async function init(){
 function resetLoops(){
   clearTimers();
   const iv = (+$('#refresh').value||5)*1000;
-  fetchSignals(); fetchFindings(); fetchHealth(); netcheck();
-  timers.push(setInterval(fetchSignals, iv));
+  fetchTop(); fetchFindings(); fetchHealth(); netcheck(); fetchLiquidity();
+  timers.push(setInterval(fetchTop, iv));
   timers.push(setInterval(fetchFindings, iv));
   timers.push(setInterval(fetchHealth, 15000));
   timers.push(setInterval(netcheck, 30000));
+  timers.push(setInterval(fetchLiquidity, 60000));
 }
 
 async function runAgentsNow(){
@@ -166,25 +173,44 @@ async function netcheck(){
   }
 }
 
-async function fetchSignals(){
+async function fetchLiquidity(){
+  try{
+    const r = await fetch('/liquidity');
+    const j = await r.json();
+    const cls = j.risk_on ? 'ok' : 'warn';
+    $('#liq').className = 'pill '+cls;
+    $('#liq').innerHTML = j.error ? `<span>⚠️</span><span>Error</span>` : (j.risk_on ? '<span>✅</span><span>Risk-on</span>' : '<span>⚠️</span><span>Risk-off</span>');
+  }catch(e){
+    $('#liq').className = 'pill bad';
+    $('#liq').innerHTML = '<span>⚠️</span><span>Unavailable</span>';
+  }
+}
+
+async function fetchTop(){
   if(!current) return;
   try{
+    // legacy signals (best bid/ask, rvol, mom1, cache size)
     const sig = await (await fetch(`/signals?symbol=${encodeURIComponent(current)}`)).json();
-    // legacy + new keys supported
-    const p1 = (sig.details && sig.details.p_1m) || sig.p_1m || null;
-    const p5 = (sig.details && sig.details.p_5m) || sig.p_5m || null;
-    const p15 = (sig.details && sig.details.p_15m) || sig.p_15m || null;
-    const pup = (sig.details && sig.details.p_up) || sig.p_up || null;
-    $('#p_up').textContent = fmtNum(pup,3);
-    $('#p_breakdown').textContent = `p_1m=${fmtNum(p1,3)} · p_5m=${fmtNum(p5,3)} · p_15m=${fmtNum(p15,3)}`;
-
-    $('#pxv').textContent = fmtNum(sig.px_vs_vwap_bps || sig.px_vs_vwap_bps_1m || 0.0, 1);
-    $('#mom1').textContent = fmtNum(sig.mom1_bps || sig.mom_bps_1m || 0.0, 1);
-    $('#mom5').textContent = fmtNum(sig.mom5_bps || sig.mom_bps_5m || 0.0, 1);
-    $('#rvol').textContent = fmtNum(sig.rvol_1m5_vs20 || sig.rvol_vs_recent || 0.0, 2);
     $('#bb').textContent = fmtNum(sig.best_bid, 2);
     $('#ba').textContent = fmtNum(sig.best_ask, 2);
     $('#cached').textContent = fmtNum(sig.trades_cached, 0);
+    $('#mom1').textContent = fmtNum(sig.mom1_bps, 1);
+    $('#rvol').textContent = fmtNum(sig.rvol_vs_recent, 2);
+
+    // bars-based per-TF signals
+    const tf = await (await fetch(`/signals_tf?symbol=${encodeURIComponent(current)}`)).json();
+    $('#mom5').textContent = fmtNum(tf.mom_bps_5m, 1);
+    $('#pxv').textContent = fmtNum(tf.px_vs_vwap_bps_1m, 1);
+
+    // update trend score numbers from latest findings
+    const findings = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=5`)).json();
+    const list = Array.isArray(findings.findings)? findings.findings : [];
+    const ts = list.find(x => x.agent === 'trend_score');
+    if (ts && ts.details){
+      const d = ts.details;
+      $('#p_up').textContent = fmtNum(d.p_up, 3);
+      $('#p_breakdown').textContent = `p_1m=${fmtNum(d.p_1m,3)} · p_5m=${fmtNum(d.p_5m,3)} · p_15m=${fmtNum(d.p_15m,3)}`;
+    }
   }catch(e){ console.error(e); }
 }
 
