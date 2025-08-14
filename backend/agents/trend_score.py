@@ -39,35 +39,40 @@ class TrendScoreAgent(Agent):
         z = w["bias"] + w["w_dcvd"]*_tanh(dcvd,1500) + w["w_rvol"]*_tanh((rvol-1.0),0.5) - w["w_rvratio"]*_tanh((rvratio-1.0),0.3) + w["w_vwap"]*_tanh(px_vs_vwap_bps,12.0) + w["w_mom"]*_tanh(mom_bps,10.0)
         return _sigmoid(z)
 
-    async def run_once(self, symbol: str) -> Optional[dict]:
-        now = time.time()
-        buf = trades[symbol]
-        w1  = [r for r in buf if r[0] >= now - 60]
-        w5  = [r for r in buf if r[0] >= now - 300]
-        w15 = [r for r in buf if r[0] >= now - 900]
+def run_once(self, symbol: str) -> Optional[dict]:
+    # --- bar-based path ---
+    if FEATURE_BARS:
+        try:
+            tf = compute_signals_tf(symbol, ["1m","5m","15m"]) or {}
+            mom1 = float(tf.get("mom_bps_1m", 0.0) or 0.0)
+            mom5 = float(tf.get("mom_bps_5m", 0.0) or 0.0)
+            mom15 = float(tf.get("mom_bps_15m", 0.0) or 0.0)
+            pxv = float(tf.get("px_vs_vwap_bps_1m", 0.0) or 0.0)
+            rvol = float(tf.get("rvol_5m", 0.0) or 0.0)
 
-        d1, d5, d15 = _dcvd(w1), _dcvd(w5), _dcvd(w15)
-        rvol = _rvol(w5, w15) or 0.0
-        up = sum((r[2] or 0.0) for r in w15 if (r[3] or "")=="buy")
-        dn = sum((r[2] or 0.0) for r in w15 if (r[3] or "")=="sell")
-        rvr = (dn+1e-9)/(up+1e-9)
-        mom1, mom5 = _mom_bps(w1), _mom_bps(w5)
+            p1  = self._hprob(mom1, rvol, rvol, pxv, mom1)
+            p5  = self._hprob(mom5, rvol, rvol, pxv, mom5)
+            p15 = self._hprob(mom15, rvol, rvol, pxv, mom5 * 0.6)
 
-        # price vs vwap(20m)
-        vwin = [r for r in buf if r[0] >= now - 20*60]
-        vwap = None
-        if vwin:
-            num = sum((r[1] or 0.0)*(r[2] or 0.0) for r in vwin); den = sum((r[2] or 0.0) for r in vwin)
-            vwap = (num/den) if den else None
-        bid, ask = best_px.get(symbol, (None,None))
-        px = ask or bid
-        px_vwap_bps = ((px - vwap)/vwap * 1e4) if (vwap and px) else 0.0
+            wm = self.w_mtf
+            p_up = max(0.0, min(1.0, wm["w_1m"]*p1 + wm["w_5m"]*p5 + wm["w_15m"]*p15))
+            return {"score": round(p_up*10,2), "label":"trend_score",
+                    "details":{"p_up":round(p_up,4),"p_1m":round(p1,4),"p_5m":round(p5,4),"p_15m":round(p15,4)}}
+        except Exception:
+            pass  # fall back to legacy path
 
-        p1  = self._hprob(d1, rvol, rvr, px_vwap_bps, mom1)
-        p5  = self._hprob(d5, rvol, rvr, px_vwap_bps, mom5)
-        p15 = self._hprob(d15, rvol, rvr, px_vwap_bps, mom5*0.6)
-        wm = self.w_mtf
-        p_ens = max(0.0, min(1.0, wm["w_1m"]*p1 + wm["w_5m"]*p5 + wm["w_15m"]*p15))
+    # --- legacy path (unchanged, but cast floats) ---
+    sig = compute_signals(symbol) or {}
+    mom1 = float(sig.get("mom1_bps", 0.0) or 0.0)
+    mom5 = float(sig.get("mom5_bps", 0.0) or 0.0)
+    pxv  = float(sig.get("px_vs_vwap_bps", 0.0) or 0.0)
+    rvol = float(sig.get("rvol_vs_recent", 0.0) or 0.0)
 
-        return {"score": round(p_ens*10.0,2), "label":"trend_score",
-                "details":{"p_up": round(p_ens,4),"p_1m": round(p1,4),"p_5m": round(p5,4),"p_15m": round(p15,4)}}
+    p1  = self._hprob(mom1, rvol, rvol, pxv, mom1)
+    p5  = self._hprob(mom5, rvol, rvol, pxv, mom5)
+    p15 = self._hprob(mom5*0.6, rvol, rvol, pxv, mom1*0.4)
+
+    wm = self.w_mtf
+    p_up = max(0.0, min(1.0, wm["w_1m"]*p1 + wm["w_5m"]*p5 + wm["w_15m"]*p15))
+    return {"score": round(p_up*10,2), "label":"trend_score",
+            "details":{"p_up":round(p_up,4),"p_1m":round(p1,4),"p_5m":round(p5,4),"p_15m":round(p15,4)}}
