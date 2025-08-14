@@ -1,12 +1,21 @@
 # backend/state.py
-from __future__ import annotations
 from collections import defaultdict, deque
-from typing import Deque, Dict, Optional, Tuple, Any
+from typing import Deque, Dict, Tuple, Optional. Any
+from __future__ import annotations
 from .db import pg_exec, pg_fetchone
 import time
+
 # ------------------------------
 # Realtime market state (feeds)
 # ------------------------------
+
+# existing: trades, POSTURE_STATE, etc.
+# ensure trades exists
+try:
+    trades
+except NameError:
+    trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=50_000))
+
 # Each trade tuple: (ts_epoch: float, price: float, size: float, side: "buy"|"sell")
 trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=10_000))
 
@@ -20,19 +29,41 @@ trades = defaultdict(lambda: deque(maxlen=50_000))
 # Latest quoted bests
 _best_px = defaultdict(lambda: {"bid": None, "ask": None})
 
-def record_trade(*, symbol: str, price: float, size: float, side: str,
-                 bid: float|None = None, ask: float|None = None,
-                 ts: float|None = None):
-    """Append trade and (optionally) update best bid/ask."""
-    lst = trades[symbol]
-    lst.append({"ts": ts or time.time(), "price": float(price), "size": float(size), "side": side})
-    # keep a reasonable cap so memory doesn’t balloon
-    if len(lst) > 5000:
-        del lst[:len(lst)-4000]
+# NEW: best quotes + last price caches
+_best_quotes: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+_last_price: Dict[str, float] = {}
 
-    # <- this is the critical line for quotes
-    if bid is not None and ask is not None:
-        _best_quotes[symbol] = (float(bid), float(ask))
+def get_best_quotes(symbol: str) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    return _best_quotes.get(symbol)
+
+def get_last_price(symbol: str) -> Optional[float]:
+    return _last_price.get(symbol)
+
+def record_trade(symbol: str, ts, price, size, side, bid=None, ask=None):
+    """
+    Append a trade and optionally update best bid/ask.
+    ts may arrive in ms; normalize to seconds.
+    """
+    try:
+        ts = float(ts); price = float(price); size = float(size)
+    except Exception:
+        return
+    if ts > 1e12:  # ms -> s
+        ts /= 1000.0
+
+    dq = trades.setdefault(symbol, deque(maxlen=50_000))
+    dq.append((ts, price, size, side))
+    _last_price[symbol] = price
+
+    if bid is not None or ask is not None:
+        b, a = _best_quotes.get(symbol, (None, None))
+        if bid is not None:
+            try: b = float(bid)
+            except: pass
+        if ask is not None:
+            try: a = float(ask)
+            except: pass
+        _best_quotes[symbol] = (b, a)
 
 def get_best_quote(symbol: str) -> tuple[float|None, float|None]:
     return _best_quotes.get(symbol, (None, None))
