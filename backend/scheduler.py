@@ -26,7 +26,15 @@ AGENTS: list[Agent] = [
     TrendScoreAgent(),
     LLMAnalystAgent(),
 ] + ([SessionReversalAgent(), OpeningDriveReversalAgent()] if FEATURE_REVERSAL else [])
+
 _last_run_ts: dict[tuple, float] = defaultdict(lambda: 0.0)
+
+AGENTS = [
+    RVOLSpikeAgent(interval_sec=5),
+    CVDDivergenceAgent(interval_sec=10),
+    TrendScoreAgent(interval_sec=15),   # <— ensure included
+    LLMAnalystAgent(interval_sec=60),   # <— ensure included (optional)
+]
 
 def _iso(ts: float | int | None) -> str | None:
     if not ts or ts <= 0:
