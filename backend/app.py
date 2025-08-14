@@ -30,12 +30,6 @@ if STATIC_DIR.exists():
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# --- root: serve the dashboard ---
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    # index.html must live at backend/templates/index.html
-    return templates.TemplateResponse("index.html", {"request": request})
-
 # Optional: include GitHub webhook router if present
 try:
     from .github_webhook import router as github_router
@@ -96,17 +90,17 @@ async def signals(symbol: str = Query(default=SYMBOLS[0])):
 # Observe the live state (trades and bars)
 @app.get("/debug/state")
 async def debug_state(symbol: str = Query(...)):
-    from .state import trades, quotes
+    from .state import trades
     from .bars import build_bars
     rows = list(trades.get(symbol, []))
     last = rows[-1] if rows else None
-    age_s = (time.time() - last[0]) if last else None
+    age = (time.time() - last[0]) if last else None
     bars1 = build_bars(symbol, "1m", 60)
     return {
         "symbol": symbol,
         "trades_cached": len(rows),
-        "last_trade": last,                  # [ts, price, size, side]
-        "last_trade_age_s": round(age_s, 3) if age_s is not None else None,
+        "last_trade": last,                       # [ts, price, size, side]
+        "last_trade_age_s": round(age, 3) if age else None,
         "bars_1m_count": len(bars1),
         "bars_1m_tail": bars1[-3:],
     }
@@ -115,17 +109,21 @@ async def debug_state(symbol: str = Query(...)):
 @app.get("/debug/features")
 async def debug_features(symbol: str = Query(...)):
     from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
-    b1  = build_bars(symbol, "1m", 60)
-    b5  = build_bars(symbol, "5m", 240)
-    b15 = build_bars(symbol, "15m", 480)
+    b1 = build_bars(symbol, "1m", 60)
+    b5 = build_bars(symbol, "5m", 240)
+    b15= build_bars(symbol, "15m",480)
+    def num(x):
+        try:
+            v=float(x); 
+            return v if (v==v and v not in (float("inf"), float("-inf"))) else 0.0
+        except: return 0.0
     return {
         "symbol": symbol,
         "bars": {"1m": len(b1), "5m": len(b5), "15m": len(b15)},
-        "mom_bps_1m":        _num(momentum_bps(b1, 1)),
-        "mom_bps_5m":        _num(momentum_bps(b5, 1)),
-        "mom_bps_15m":       _num(momentum_bps(b15,1)),
-        "px_vs_vwap_bps_1m": _num(px_vs_vwap_bps(b1, 20)),
-        "atr_1m":            _num(atr(b1, 14)),
+        "mom_bps_1m":        num(momentum_bps(b1,1)),
+        "mom_bps_5m":        num(momentum_bps(b5,1)),
+        "px_vs_vwap_bps_1m": num(px_vs_vwap_bps(b1,20)),
+        "atr_1m":            num(atr(b1,14)),
     }
     
 # Hardened signals_tf: never starve the UI
