@@ -53,5 +53,5 @@ def compute_signals(symbol: str) -> dict:
     "best_bid": _json_finite(best_bid[symbol]),
     "best_ask": _json_finite(best_ask[symbol]),
     "trades_cached": len(trades[symbol]),
-}
-return _sanitize(sig)
+    }
+    return _sanitize(sig)
