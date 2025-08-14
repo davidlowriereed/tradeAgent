@@ -7,15 +7,13 @@ from .db import pg_exec, pg_fetchone
 # ------------------------------
 # Realtime market state (feeds)
 # ------------------------------
+# Each trade tuple: (ts_epoch: float, price: float, size: float, side: "buy"|"sell")
 trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=10_000))
 
-best_bid: Dict[str, Optional[float]] = {}
-best_ask: Dict[str, Optional[float]] = {}
-
-trades = defaultdict(list)        # dict[str, list[tuple(ts, price, size, side)]]
-cvd = defaultdict(float)          # dict[str, float]
-best_bid = defaultdict(float)     # dict[str, float]
-best_ask = defaultdict(float)     # dict[str, float]
+# Running CVD and top-of-book
+cvd: Dict[str, float] = defaultdict(float)
+best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
+best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
 
 def best_px(symbol: str) -> Tuple[Optional[float], Optional[float]]:
     return best_bid.get(symbol), best_ask.get(symbol)
@@ -23,7 +21,6 @@ def best_px(symbol: str) -> Tuple[Optional[float], Optional[float]]:
 # ---------------------------------------------------------
 # Position / posture state  (DB + in-memory cache)
 # ---------------------------------------------------------
-# In-memory cache keyed by symbol; used for quick reads
 _POSTURE_CACHE: Dict[str, Dict[str, Any]] = defaultdict(
     lambda: {
         "status": "flat",
@@ -35,7 +32,7 @@ _POSTURE_CACHE: Dict[str, Dict[str, Any]] = defaultdict(
     }
 )
 
-# Back-compat name expected by older modules (e.g., scheduler.py)
+# Back-compat alias (older code imports this)
 POSTURE_STATE = _POSTURE_CACHE
 
 def _row_to_state(row: Optional[dict], symbol: str) -> Dict[str, Any]:
@@ -83,7 +80,7 @@ def set_position(
     return get_position(symbol)
 
 __all__ = [
-    "trades", "best_bid", "best_ask", "best_px",
+    "trades", "cvd", "best_bid", "best_ask", "best_px",
     "get_position", "set_position",
     "POSTURE_STATE",
 ]
