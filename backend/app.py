@@ -60,6 +60,8 @@ async def version():
         "build_time": os.getenv("BUILD_TIME", ""),
         "mode": os.getenv("MODE", "realtime"),
     }
+    except Exception as e:
+        return {"Not Working"}
 
 
 # Ensure DB schema on startup (safer to do it here than at import time)
