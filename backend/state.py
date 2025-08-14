@@ -12,6 +12,11 @@ trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=10_000))
 best_bid: Dict[str, Optional[float]] = {}
 best_ask: Dict[str, Optional[float]] = {}
 
+trades = defaultdict(list)        # dict[str, list[tuple(ts, price, size, side)]]
+cvd = defaultdict(float)          # dict[str, float]
+best_bid = defaultdict(float)     # dict[str, float]
+best_ask = defaultdict(float)     # dict[str, float]
+
 def best_px(symbol: str) -> Tuple[Optional[float], Optional[float]]:
     return best_bid.get(symbol), best_ask.get(symbol)
 
