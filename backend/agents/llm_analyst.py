@@ -16,6 +16,49 @@ from .base import Agent
 import re, json, asyncio, httpx, time
 
 
+class LlmAnalystAgent(Agent):
+    name = "llm_analyst"
+
+    async def run_once(self, symbol: str):
+        sig = compute_signals(symbol)
+        snap = latest_trend_snapshot(symbol) or {}
+        p_up = float(snap.get("p_up", 0.5))
+        pos = get_position(symbol) if callable(get_position) else {"status":"flat"}
+
+        # Simple rule set
+        rvol_ok = (sig["rvol_vs_recent"] >= 1.2)
+        mom_pos = (sig["mom1_bps"] > 0.0)
+        mom_neg = (sig["mom1_bps"] < 0.0)
+        flow_up = (sig["dcvd_2m"] > 0)
+        flow_dn = (sig["dcvd_2m"] < 0)
+
+        action = "observe"
+        if pos["status"] == "flat":
+            if p_up >= 0.6 and rvol_ok and (mom_pos or flow_up):
+                action = "consider-entry-long"
+            elif p_up <= 0.4 and rvol_ok and (mom_neg or flow_dn):
+                action = "consider-entry-short"
+        elif pos["status"] == "long":
+            if p_up < 0.45 and (mom_neg or flow_dn):
+                action = "consider-exit"
+            if p_up < 0.35 and rvol_ok and (mom_neg and flow_dn):
+                action = "consider-reverse-short"
+        elif pos["status"] == "short":
+            if p_up > 0.55 and (mom_pos or flow_up):
+                action = "consider-exit"
+            if p_up > 0.65 and rvol_ok and (mom_pos and flow_up):
+                action = "consider-reverse-long"
+
+        conf = _conf(abs(sig["mom1_bps"])/100.0, 0.6 if rvol_ok else 0.4, p_up if action.endswith("long") else (1-p_up if action.endswith("short") else 0.5))
+        rationale = (
+            f"p_up={p_up:.2f}, RVOL={sig['rvol_vs_recent']:.2f}, mom1_bps={sig['mom1_bps']:.0f}, "
+            f"dCVD(2m)={'+' if sig['dcvd_2m']>=0 else ''}{sig['dcvd_2m']:.2f}. "
+            f"Position={pos.get('status','flat')}."
+        )
+
+        details = {"action": action, "confidence": round(conf,2), "rationale": rationale, "tweaks": []}
+        return {"score": round(7*conf, 2), "label": "llm_analysis", "details": details}
+
 class LLMAnalystAgent(Agent):
     """
     details = {
