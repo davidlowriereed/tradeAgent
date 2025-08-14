@@ -1,5 +1,5 @@
 # backend/signals.py
-import time, math
+import time, math, statistics
 from typing import List, Tuple, Optional
 from .state import trades, best_px
 
@@ -34,45 +34,58 @@ def _rvol(w5: List[tuple], w15: List[tuple]) -> Optional[float]:
     base = (sum((r[2] or 0.0) for r in w15) / 3.0) if w15 else 0.0
     return (vol5 / base) if base > 0 else None
 
-def compute_signals(symbol: str) -> dict:
-    """
-    Snapshot for dashboard & agents.
-    Fields: cvd, volume_5m, rvol_vs_recent, best_bid, best_ask, trades_cached,
-            mom1_bps, dcvd_2m, last_price, symbol
-    """
+def _last_n_minutes(symbol: str, seconds: int):
     now = time.time()
-    buf = list(trades[symbol])  # deque[(ts, price, size, side)]
+    return [t for t in trades[symbol] if now - t[0] <= seconds]
 
-    # windows
-    w1  = [r for r in buf if r[0] >= now - 60]
-    w2  = [r for r in buf if r[0] >= now - 120]
-    w5  = [r for r in buf if r[0] >= now - 300]
-    w15 = [r for r in buf if r[0] >= now - 900]
+def compute_signals(symbol: str) -> dict:
+    now = time.time()
+    recent5 = _last_n_minutes(symbol, 300)   # 5 min
+    recent1 = _last_n_minutes(symbol, 60)    # 1 min
+    recent2 = _last_n_minutes(symbol, 120)   # 2 min
 
-    last_px = (w1[-1][1] if w1 else (buf[-1][1] if buf else None))
+    # 5m volume
+    vol5 = sum(sz for _, _, sz, _, _, _ in recent5)
 
-    # metrics
-    cvd_val   = _cvd_total(buf)
-    vol5      = sum((r[2] or 0.0) for r in w5)
-    rvol_val  = _rvol(w5, w15)
-    mom1      = _mom_bps(w1)
-    dcvd2     = _dcvd(w2)
+    # RVOL vs mean of last 12 rolling 5m buckets (fallback 3.0 when very little data)
+    buckets = []
+    # compute simple rolling 5m buckets back ~60 minutes
+    for i in range(12):
+        lo = now - (i+1)*300
+        hi = now - i*300
+        v = sum(sz for ts,_,sz,_,_,_ in trades[symbol] if lo < ts <= hi)
+        buckets.append(v)
+    rvol = (vol5 / (statistics.fmean(buckets) or 1.0)) if any(buckets) else 3.0
 
-    bid, ask  = best_px(symbol)
-    # fallback for top-of-book if feed hasn’t filled it yet
-    if bid is None and ask is None and last_px is not None:
-        bid = ask = last_px
+    # Momentum: last price change over last 60s in bps
+    p_first = next((p for ts,p,_,_,_,_ in recent1[:1]), None)
+    p_last  = next((p for ts,p,_,_,_,_ in recent1[-1:]), None)
+    if p_first and p_last and p_first > 0:
+        mom1_bps = ((p_last - p_first) / p_first) * 10_000.0
+    else:
+        mom1_bps = 0.0
 
-    sig = {
-        "cvd": _finite(cvd_val),
-        "volume_5m": _finite(vol5),
-        "rvol_vs_recent": _finite(rvol_val),
-        "best_bid": _finite(bid),
-        "best_ask": _finite(ask),
-        "trades_cached": len(buf),
-        "mom1_bps": _finite(mom1),
-        "dcvd_2m": _finite(dcvd2),
-        "last_price": _finite(last_px),
-        "symbol": symbol,
+    # dCVD over 2m (signed size buy-sell)
+    def signed_sum(rows):
+        s = 0.0
+        for _,_,sz,side,_,_ in rows:
+            if side == "buy":  s += sz
+            elif side == "sell": s -= sz
+        return s
+    dcvd_2m = signed_sum(recent2)
+
+    # CVD over the whole cache (visible to the dashboard card)
+    cvd_total = signed_sum(trades[symbol])
+
+    bid, ask = best_px(symbol)
+    return {
+        "cvd": round(cvd_total, 6),
+        "volume_5m": vol5,
+        "rvol_vs_recent": round(rvol, 2),
+        "best_bid": bid,
+        "best_ask": ask,
+        "trades_cached": len(trades[symbol]),
+        "mom1_bps": mom1_bps,
+        "dcvd_2m": dcvd_2m,
     }
     return _sanitize(sig)
