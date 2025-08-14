@@ -91,3 +91,20 @@ def compute_signals(symbol: str) -> dict:
         "dcvd_2m": dcvd_2m,
     }
     return _sanitize(sig)
+
+
+from .bars import build_bars, atr as bars_atr, px_vs_vwap_bps, momentum_bps, rvol_ratio
+
+def compute_signals_tf(symbol: str, tfs: list[str]=["1m","5m","15m"]) -> dict:
+    """
+    Return per-timeframe features computed on OHLCV bars.
+    Keys: mom_bps_{tf}, px_vs_vwap_bps_{tf}, rvol_{tf}, atr_{tf}
+    """
+    out = {}
+    for tf in tfs:
+        bars = build_bars(symbol, tf=tf, lookback_min=120)
+        out[f"mom_bps_{tf}"] = momentum_bps(bars, lookback=1)
+        out[f"px_vs_vwap_bps_{tf}"] = px_vs_vwap_bps(bars, window=20)
+        out[f"rvol_{tf}"] = rvol_ratio(bars, win=5, baseline=20)
+        out[f"atr_{tf}"] = bars_atr(bars, period=14)
+    return out
