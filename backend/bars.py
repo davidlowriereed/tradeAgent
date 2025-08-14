@@ -10,45 +10,35 @@ def _bucket(ts: float, sec: int) -> int:
     return int(ts // sec) * sec
 
 def build_bars(symbol: str, tf: str = "1m", lookback_min: int = 60) -> List[dict]:
-    """
-    Build simple OHLCV bars from the in-memory trades deque.
-    Returns a list of dicts sorted by ascending time with keys:
-    { "t": epoch_sec, "o": open, "h": high, "l": low, "c": close, "v": volume, "vwap": vwap }
-    """
     sec = _SEC_PER.get(tf, 60)
     now = time.time()
     start = now - lookback_min * 60
-    buckets: Dict[int, dict] = {}
 
-    # Expect trades[symbol] to be an iterable of (ts, price, size, side)
-    for ts, price, size, side in trades.get(symbol, []):
-        if ts < start:
-            continue
-        # Cast and skip malformed rows per-trade (INSIDE the loop)
+    buckets: Dict[int, dict] = {}
+    rows = list(trades.get(symbol, []))
+
+    for ts, price, size, side in rows:
+        # normalize ts (ms -> s) and types
+        if ts > 1e12:    # looks like milliseconds
+            ts = ts / 1000.0
         try:
-            p = float(price)
-            s = float(size)
+            price = float(price)
+            size  = float(size)
         except (TypeError, ValueError):
+            continue
+
+        if ts < start:
             continue
 
         b = _bucket(ts, sec)
         row = buckets.get(b)
         if row is None:
-            row = {"t": b, "o": p, "h": p, "l": p, "c": p, "v": 0.0, "pv": 0.0}
-            buckets[b] = row
+            row = buckets[b] = {"t": b, "o": price, "h": price, "l": price, "c": price, "v": 0.0, "pv": 0.0}
         else:
-            row["h"] = max(row["h"], p)
-            row["l"] = min(row["l"], p)
-            row["c"] = p
+            row["h"] = max(row["h"], price); row["l"] = min(row["l"], price); row["c"] = price
+        row["v"] += size
+        row["pv"] += size * price
 
-        row["v"] += s
-        row["pv"] += s * p  # accumulate price*volume for VWAP
-
-    bars = [buckets[k] for k in sorted(buckets.keys())]
-    for b in bars:
-        b["vwap"] = (b["pv"] / b["v"]) if b["v"] else None
-        b.pop("pv", None)
-    return bars
 
 def atr(bars: List[dict], period: int = 14) -> float:
     if len(bars) < 2:
