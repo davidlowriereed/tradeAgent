@@ -147,3 +147,26 @@ async def run_now(names: str | None = None, agent: str | None = None, symbol: st
         except Exception as e:
             results.append({"agent": a.name, "error": f"{type(e).__name__}: {e}"})
     return {"ok": True, "ran": [a.name for a in chosen], "results": results}
+
+
+# --- Added lightweight data endpoints for dashboard ---
+@app.get("/signals_tf")
+async def signals_tf(symbol: str = Query(..., description="Symbol, e.g., BTC-USD")):
+    # Import locally to avoid top-level churn
+    from .signals import compute_signals_tf
+    try:
+        out = compute_signals_tf(symbol, ["1m","5m","15m"])
+        out["symbol"] = symbol
+        return out
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "symbol": symbol}
+
+@app.get("/liquidity")
+async def liquidity_state():
+    try:
+        from .liquidity import get_liquidity_state
+        risk_on, score = get_liquidity_state()
+        return {"risk_on": bool(risk_on), "liquidity_score": float(score)}
+    except Exception as e:
+        return {"risk_on": False, "liquidity_score": 0.0, "error": f"{type(e).__name__}: {e}"}
+
