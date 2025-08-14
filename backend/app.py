@@ -297,6 +297,22 @@ async def debug_features(symbol: str = Query(...)):
         "atr_1m":            num(atr(b1, 14)),
     }
 
+# backend/app.py
+@app.get("/llm-health")
+async def llm_health():
+    import os, httpx
+    key = os.getenv("OPENAI_API_KEY","").strip()
+    base = os.getenv("OPENAI_BASE_URL","").strip()
+    if not key:
+        return {"ok": False, "reason": "missing_api_key"}
+    url = base.rstrip("/") + "/v1/models" if base else "https://api.openai.com/v1/models"
+    try:
+        headers = {"Authorization": f"Bearer {key}"}
+        with httpx.Client(timeout=5) as cli:
+            r = cli.get(url, headers=headers)
+        return {"ok": r.status_code == 200, "status": r.status_code}
+    except Exception as e:
+        return {"ok": False, "reason": f"{type(e).__name__}"}
 
 # ---------------------------------------------------------
 # Data access endpoints
