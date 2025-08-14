@@ -88,12 +88,40 @@ async def debug_features(symbol: str = Query(...)):
         "atr_1m":            _num(atr(b1, 14)),
     }
     
+# Hardened signals_tf: never starve the UI
 @app.get("/signals_tf")
-async def signals_tf(symbol: str):
+async def signals_tf(symbol: str = Query(...)):
     from .signals import compute_signals_tf
-    out = compute_signals_tf(symbol, ["1m", "5m", "15m"])
-    out["symbol"] = symbol
-    return out
+    try:
+        tf = compute_signals_tf(symbol, ["1m", "5m", "15m"]) or {}
+    except Exception as e:
+        from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
+        b1  = build_bars(symbol, "1m", 60)
+        b5  = build_bars(symbol, "5m", 240)
+        b15 = build_bars(symbol, "15m", 480)
+        tf = {
+            "mom_bps_1m":        momentum_bps(b1, 1),
+            "mom_bps_5m":        momentum_bps(b5, 1),
+            "mom_bps_15m":       momentum_bps(b15,1),
+            "px_vs_vwap_bps_1m": px_vs_vwap_bps(b1, 20),
+            "atr_1m":            atr(b1, 14),
+            "_fallback_error": f"{type(e).__name__}: {e}",
+        }
+    return {
+        "symbol": symbol,
+        "mom_bps_1m":         _num(tf.get("mom_bps_1m")),
+        "mom_bps_5m":         _num(tf.get("mom_bps_5m")),
+        "mom_bps_15m":        _num(tf.get("mom_bps_15m")),
+        "px_vs_vwap_bps_1m":  _num(tf.get("px_vs_vwap_bps_1m")),
+        "px_vs_vwap_bps_5m":  _num(tf.get("px_vs_vwap_bps_5m")),
+        "px_vs_vwap_bps_15m": _num(tf.get("px_vs_vwap_bps_15m")),
+        "rvol_1m":            _num(tf.get("rvol_1m")),
+        "rvol_5m":            _num(tf.get("rvol_5m")),
+        "rvol_15m":           _num(tf.get("rvol_15m")),
+        "atr_1m":             _num(tf.get("atr_1m")),
+        "atr_5m":             _num(tf.get("atr_5m")),
+        "atr_15m":            _num(tf.get("atr_15m")),
+    }
 
 @app.get("/findings")
 async def findings(symbol: str | None = None, limit: int = 50):
@@ -187,43 +215,6 @@ async def run_now(names: str | None = None, agent: str | None = None, symbol: st
         except Exception as e:
             results.append({"agent": a.name, "error": f"{type(e).__name__}: {e}"})
     return {"ok": True, "ran": [a.name for a in chosen], "results": results}
-
-
-# --- Added lightweight data endpoints for dashboard ---
-# Hardened signals_tf: never starve the UI
-@app.get("/signals_tf")
-async def signals_tf(symbol: str = Query(...)):
-    from .signals import compute_signals_tf
-    try:
-        tf = compute_signals_tf(symbol, ["1m", "5m", "15m"]) or {}
-    except Exception as e:
-        from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
-        b1  = build_bars(symbol, "1m", 60)
-        b5  = build_bars(symbol, "5m", 240)
-        b15 = build_bars(symbol, "15m", 480)
-        tf = {
-            "mom_bps_1m":        momentum_bps(b1, 1),
-            "mom_bps_5m":        momentum_bps(b5, 1),
-            "mom_bps_15m":       momentum_bps(b15,1),
-            "px_vs_vwap_bps_1m": px_vs_vwap_bps(b1, 20),
-            "atr_1m":            atr(b1, 14),
-            "_fallback_error": f"{type(e).__name__}: {e}",
-        }
-    return {
-        "symbol": symbol,
-        "mom_bps_1m":         _num(tf.get("mom_bps_1m")),
-        "mom_bps_5m":         _num(tf.get("mom_bps_5m")),
-        "mom_bps_15m":        _num(tf.get("mom_bps_15m")),
-        "px_vs_vwap_bps_1m":  _num(tf.get("px_vs_vwap_bps_1m")),
-        "px_vs_vwap_bps_5m":  _num(tf.get("px_vs_vwap_bps_5m")),
-        "px_vs_vwap_bps_15m": _num(tf.get("px_vs_vwap_bps_15m")),
-        "rvol_1m":            _num(tf.get("rvol_1m")),
-        "rvol_5m":            _num(tf.get("rvol_5m")),
-        "rvol_15m":           _num(tf.get("rvol_15m")),
-        "atr_1m":             _num(tf.get("atr_1m")),
-        "atr_5m":             _num(tf.get("atr_5m")),
-        "atr_15m":            _num(tf.get("atr_15m")),
-    }
 
 @app.get("/liquidity")
 async def liquidity_state():
