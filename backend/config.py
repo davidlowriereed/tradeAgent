@@ -34,9 +34,10 @@ MACRO_RVOL_MIN       = float(os.getenv("MACRO_RVOL_MIN", "1.3"))
 MACRO_INTERVAL_SEC   = int(os.getenv("MACRO_INTERVAL_SEC", "60"))
 
 
-# Agents thresholds
-ALERT_MIN_RVOL = float(os.getenv("ALERT_MIN_RVOL", "5.0"))
-ALERT_CVD_DELTA = float(os.getenv("ALERT_CVD_DELTA", "75"))
+# ---- existing values; ensure these are numeric ----
+ALERT_MIN_RVOL       = _f("ALERT_MIN_RVOL", 5.0)
+ALERT_CVD_DELTA      = _f("ALERT_CVD_DELTA", 75.0)
+AGENT_ALERT_COOLDOWN_SEC = _i("AGENT_ALERT_COOLDOWN_SEC", 120)
 
 # TrendScore / posture config
 TS_INTERVAL = int(os.getenv("TS_INTERVAL", "30"))
@@ -55,15 +56,24 @@ FEATURE_NEW_TREND = os.getenv("FEATURE_NEW_TREND", "true").lower() == "true"
 FEATURE_REVERSAL = os.getenv("FEATURE_REVERSAL", "false").lower() == "true"
 FEATURE_LIQUIDITY = os.getenv("FEATURE_LIQUIDITY", "false").lower() == "true"
 
-# Posture / guard thresholds (env-driven, with sane defaults)
-POSTURE_ENTRY_CONF = float(os.getenv("POSTURE_ENTRY_CONF", "0.60"))
-PG_CVD_5M_NEG = float(os.getenv("PG_CVD_5M_NEG", "1500"))
-PG_CVD_2M_NEG = float(os.getenv("PG_CVD_2M_NEG", "800"))
-PG_RVOL_RATIO = float(os.getenv("PG_RVOL_RATIO", "1.2"))
-PG_PUSH_RVOL_MIN = float(os.getenv("PG_PUSH_RVOL_MIN", "0.70"))
-PG_MOM5_DOWN_BPS = float(os.getenv("PG_MOM5_DOWN_BPS", "-8"))
-PG_VWAP_MINUTES = int(os.getenv("PG_VWAP_MINUTES", "20"))
-POSTURE_MAX_AGE_MIN = int(os.getenv("POSTURE_MAX_AGE_MIN", "30"))
-PG_PERSIST_K = int(os.getenv("PG_PERSIST_K", "5"))
-PG_DD_SLOW_BPS = float(os.getenv("PG_DD_SLOW_BPS", "-60"))
+# Trend / posture thresholds (make sure all are numbers)
+POSTURE_ENTRY_CONF   = _f("POSTURE_ENTRY_CONF", 0.60)
+PG_CVD_5M_NEG        = _f("PG_CVD_5M_NEG", 1500)
+PG_CVD_2M_NEG        = _f("PG_CVD_2M_NEG", 800)
+PG_RVOL_RATIO        = _f("PG_RVOL_RATIO", 1.2)
+PG_PUSH_RVOL_MIN     = _f("PG_PUSH_RVOL_MIN", 0.70)
+PG_MOM5_DOWN_BPS     = _f("PG_MOM5_DOWN_BPS", -8)
+PG_VWAP_MINUTES      = _i("PG_VWAP_MINUTES", 20)
+POSTURE_MAX_AGE_MIN  = _i("POSTURE_MAX_AGE_MIN", 30)
+PG_PERSIST_K         = _i("PG_PERSIST_K", 5)
+
+def _f(key: str, default: float) -> float:
+    try: return float(os.getenv(key, str(default)))
+    except Exception: return float(default)
+
+def _i(key: str, default: int) -> int:
+    try: return int(float(os.getenv(key, str(default))))
+    except Exception: return int(default)
+
+
 
