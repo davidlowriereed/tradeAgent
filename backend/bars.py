@@ -1,17 +1,15 @@
-
 # backend/bars.py
 from __future__ import annotations
-from collections import defaultdict
-from typing import Dict, List, Tuple
-import time, math
+from typing import Dict, List
+import time
 from .state import trades
 
-_SEC_PER = {"1m":60, "5m":300, "15m":900}
+_SEC_PER = {"1m": 60, "5m": 300, "15m": 900}
 
 def _bucket(ts: float, sec: int) -> int:
     return int(ts // sec) * sec
 
-def build_bars(symbol: str, tf: str="1m", lookback_min: int=60) -> List[dict]:
+def build_bars(symbol: str, tf: str = "1m", lookback_min: int = 60) -> List[dict]:
     """
     Build simple OHLCV bars from the in-memory trades deque.
     Returns a list of dicts sorted by ascending time with keys:
@@ -19,45 +17,47 @@ def build_bars(symbol: str, tf: str="1m", lookback_min: int=60) -> List[dict]:
     """
     sec = _SEC_PER.get(tf, 60)
     now = time.time()
-    start = now - lookback_min*60
+    start = now - lookback_min * 60
     buckets: Dict[int, dict] = {}
-    rows = list(trades.get(symbol, []))
-    try:
-        price = float(price)
-        size  = float(size)
-    except (TypeError, ValueError):
-        continue  # skip malformed rows
-    
-    for ts, price, size, side in rows:
-        if ts < start: 
+
+    # Expect trades[symbol] to be an iterable of (ts, price, size, side)
+    for ts, price, size, side in trades.get(symbol, []):
+        if ts < start:
             continue
+        # Cast and skip malformed rows per-trade (INSIDE the loop)
+        try:
+            p = float(price)
+            s = float(size)
+        except (TypeError, ValueError):
+            continue
+
         b = _bucket(ts, sec)
         row = buckets.get(b)
         if row is None:
-            buckets[b] = {"t": b, "o": price, "h": price, "l": price, "c": price,
-                          "v": 0.0, "pv": 0.0}
-            row = buckets[b]
+            row = {"t": b, "o": p, "h": p, "l": p, "c": p, "v": 0.0, "pv": 0.0}
+            buckets[b] = row
         else:
-            row["h"] = max(row["h"], price)
-            row["l"] = min(row["l"], price)
-            row["c"] = price
-        row["v"] += float(size or 0.0)
-        row["pv"] += float(size or 0.0) * float(price or 0.0)
+            row["h"] = max(row["h"], p)
+            row["l"] = min(row["l"], p)
+            row["c"] = p
+
+        row["v"] += s
+        row["pv"] += s * p  # accumulate price*volume for VWAP
 
     bars = [buckets[k] for k in sorted(buckets.keys())]
     for b in bars:
-        b["vwap"] = (b["pv"]/b["v"]) if b["v"] else None
+        b["vwap"] = (b["pv"] / b["v"]) if b["v"] else None
         b.pop("pv", None)
     return bars
 
-def atr(bars: List[dict], period: int=14) -> float:
+def atr(bars: List[dict], period: int = 14) -> float:
     if len(bars) < 2:
         return 0.0
     trs: List[float] = []
     prev_c = bars[0]["c"]
     for b in bars[1:]:
         h, l, c = b["h"], b["l"], b["c"]
-        tr = max(h-l, abs(h - prev_c), abs(l - prev_c))
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
         trs.append(tr)
         prev_c = c
     if not trs:
@@ -65,37 +65,38 @@ def atr(bars: List[dict], period: int=14) -> float:
     p = min(period, len(trs))
     return sum(trs[-p:]) / float(p)
 
-def px_vs_vwap_bps(bars: List[dict], window: int=20) -> float:
+def px_vs_vwap_bps(bars: List[dict], window: int = 20) -> float:
     if not bars:
         return 0.0
-    # rolling vwap over last N bars
     w = bars[-window:]
-    vol = sum(b["v"] for b in w if b["v"] is not None)
-    pv  = sum((b["v"] or 0.0)*(b["vwap"] or b["c"] or 0.0) for b in w)
-    vwap = (pv/vol) if vol else None
-    c = bars[-1]["c"]
-    if vwap and c:
+    vol = sum(b.get("v", 0.0) for b in w)
+    # Use vwap if present, otherwise fall back to close
+    pv = sum((b.get("v", 0.0)) * (b.get("vwap") if b.get("vwap") is not None else b.get("c", 0.0)) for b in w)
+    vwap = (pv / vol) if vol else None
+    c = bars[-1].get("c")
+    if vwap is not None and c is not None:
         try:
-            return ( (c - vwap) / vwap ) * 1e4
+            return ((c - vwap) / vwap) * 1e4
         except ZeroDivisionError:
             return 0.0
     return 0.0
 
-def momentum_bps(bars: List[dict], lookback: int=1) -> float:
-    if len(bars) < lookback+1:
+def momentum_bps(bars: List[dict], lookback: int = 1) -> float:
+    if len(bars) < lookback + 1:
         return 0.0
-    c_now = bars[-1]["c"]
-    c_prev = bars[-1 - lookback]["c"]
-    if not (c_now and c_prev):
+    c_now = bars[-1].get("c")
+    c_prev = bars[-1 - lookback].get("c")
+    if c_now is None or c_prev is None:
         return 0.0
     try:
         return ((c_now - c_prev) / c_prev) * 1e4
     except ZeroDivisionError:
         return 0.0
 
-def rvol_ratio(bars: List[dict], win: int=5, baseline: int=20) -> float:
-    if len(bars) < max(win, baseline):
+def rvol_ratio(bars: List[dict], win: int = 5, baseline: int = 20) -> float:
+    # Need at least win + baseline bars to compute a clean ratio window
+    if len(bars) < (win + baseline):
         return 0.0
-    v_recent = sum(b["v"] for b in bars[-win:])
-    v_base = sum(b["v"] for b in bars[-(win+baseline):-win])
+    v_recent = sum(b.get("v", 0.0) for b in bars[-win:])
+    v_base = sum(b.get("v", 0.0) for b in bars[-(win + baseline):-win])
     return (v_recent / v_base) if v_base else 0.0
