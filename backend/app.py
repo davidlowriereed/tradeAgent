@@ -269,14 +269,21 @@ async def agents():
 @app.get("/health")
 async def health():
     from .config import SYMBOLS
-    from .scheduler import AGENTS_STATE  # or however you build this
     from .state import trades
+    try:
+        from .scheduler import AGENTS_STATE
+        agents = AGENTS_STATE()
+    except Exception:
+        # fallback: show names with null last_run, still return 200
+        from .scheduler import AGENTS
+        agents = {a.name: {"status": "unknown", "last_run": None} for a in AGENTS}
     return {
         "status": "ok",
         "symbols": SYMBOLS,
         "trades_cached": {sym: len(list(trades.get(sym, []))) for sym in SYMBOLS},
-        "agents": AGENTS_STATE(),  # existing helper that returns {name:{status,last_run}}
+        "agents": agents,
     }
+
 
 
 @app.get("/db-health")
