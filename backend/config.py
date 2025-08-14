@@ -66,6 +66,7 @@ FEATURE_LIQUIDITY = os.getenv("FEATURE_LIQUIDITY", "false").lower() == "true"
 
 # Trend / posture thresholds (make sure all are numbers)
 POSTURE_ENTRY_CONF   = _f("POSTURE_ENTRY_CONF", 0.60)
+PG_DD_SLOW_BPS = _f("PG_DD_SLOW_BPS", -60)
 PG_CVD_5M_NEG        = _f("PG_CVD_5M_NEG", 1500)
 PG_CVD_2M_NEG        = _f("PG_CVD_2M_NEG", 800)
 PG_RVOL_RATIO        = _f("PG_RVOL_RATIO", 1.2)
