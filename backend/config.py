@@ -66,7 +66,6 @@ FEATURE_LIQUIDITY = os.getenv("FEATURE_LIQUIDITY", "false").lower() == "true"
 
 # Trend / posture thresholds (make sure all are numbers)
 POSTURE_ENTRY_CONF   = _f("POSTURE_ENTRY_CONF", 0.60)
-PG_DD_SLOW_BPS = _f("PG_DD_SLOW_BPS", -60)
 PG_CVD_5M_NEG        = _f("PG_CVD_5M_NEG", 1500)
 PG_CVD_2M_NEG        = _f("PG_CVD_2M_NEG", 800)
 PG_RVOL_RATIO        = _f("PG_RVOL_RATIO", 1.2)
@@ -75,6 +74,8 @@ PG_MOM5_DOWN_BPS     = _f("PG_MOM5_DOWN_BPS", -8)
 PG_VWAP_MINUTES      = _i("PG_VWAP_MINUTES", 20)
 POSTURE_MAX_AGE_MIN  = _i("POSTURE_MAX_AGE_MIN", 30)
 PG_PERSIST_K         = _i("PG_PERSIST_K", 5)
+PG_DD_SLOW_BPS       = _f("PG_DD_SLOW_BPS", -60)  # <-- add this
+
 
 
 
