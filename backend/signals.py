@@ -1,7 +1,14 @@
 # backend/signals.py
 import time, math, statistics
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from .state import trades, best_px, get_best_quote
+
+def _num(x, default=0.0) -> float:
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else default
+    except Exception:
+        return default
 
 def _finite(x: Optional[float]):
     return (x if isinstance(x, (int, float)) and math.isfinite(x) else None)
@@ -38,60 +45,55 @@ def _last_n_minutes(symbol: str, seconds: int):
     now = time.time()
     return [t for t in trades[symbol] if now - t[0] <= seconds]
 
-def compute_signals(symbol: str) -> dict:
-    now = time.time()
-    recent5 = _last_n_minutes(symbol, 300)   # 5 min
-    recent1 = _last_n_minutes(symbol, 60)    # 1 min
-    recent2 = _last_n_minutes(symbol, 120)   # 2 min
-    rows = trades.get(symbol, [])
-    cvd = 0.0
-    vol5 = 0.0
-    # 5m volume
-    vol5 = sum(sz for _, _, sz, _, _, _ in recent5)
+def compute_signals(symbol: str) -> Dict[str, Any]:
+    """
+    Compute lightweight per-symbol signals for the dashboard.
+    Always returns a dict with finite floats (or None for quotes).
+    """
+    try:
+        from .bars import build_bars, momentum_bps, px_vs_vwap_bps, rvol_ratio
+        from .state import get_best_quotes, get_last_price, trades
 
-    # RVOL vs mean of last 12 rolling 5m buckets (fallback 3.0 when very little data)
-    buckets = []
-    # compute simple rolling 5m buckets back ~60 minutes
-    for i in range(12):
-        lo = now - (i+1)*300
-        hi = now - i*300
-        v = sum(sz for ts,_,sz,_,_,_ in trades[symbol] if lo < ts <= hi)
-        buckets.append(v)
-    rvol = (vol5 / (statistics.fmean(buckets) or 1.0)) if any(buckets) else 3.0
+        b1  = build_bars(symbol, "1m", 60)
+        b5  = build_bars(symbol, "5m", 240)
 
-    # Momentum: last price change over last 60s in bps
-    p_first = next((p for ts,p,_,_,_,_ in recent1[:1]), None)
-    p_last  = next((p for ts,p,_,_,_,_ in recent1[-1:]), None)
-    if p_first and p_last and p_first > 0:
-        mom1_bps = ((p_last - p_first) / p_first) * 10_000.0
-    else:
-        mom1_bps = 0.0
+        mom1 = _num(momentum_bps(b1, 1))           # 1m momentum in bps
+        mom5 = _num(momentum_bps(b5, 1))           # 5m momentum in bps
+        pxvv = _num(px_vs_vwap_bps(b1, 20))        # 1m vs 20m VWAP in bps
+        rvol = _num(rvol_ratio(b1, lookback=20))   # last vol vs recent baseline
 
-    # dCVD over 2m (signed size buy-sell)
-    def signed_sum(rows):
-        s = 0.0
-        for _,_,sz,side,_,_ in rows:
-            if side == "buy":  s += sz
-            elif side == "sell": s -= sz
-        return s
-    dcvd_2m = signed_sum(recent2)
+        bid, ask = (None, None)
+        q = get_best_quotes(symbol)
+        if q:
+            qb, qa = q
+            bid = qb if isinstance(qb, (int, float)) and math.isfinite(qb) else None
+            ask = qa if isinstance(qa, (int, float)) and math.isfinite(qa) else None
 
-    # CVD over the whole cache (visible to the dashboard card)
-    cvd_total = signed_sum(trades[symbol])
+        lp = get_last_price(symbol)
+        lp = float(lp) if isinstance(lp, (int, float)) and math.isfinite(lp) else None
 
-    best_bid, best_ask = get_best_quote(symbol)
-    return {
-        "cvd": cvd,
-        "volume_5m": vol5,
-        "rvol_vs_recent": rvol,        # your existing variable
-        "best_bid": best_bid,          # <- not None once quotes arrive
-        "best_ask": best_ask,
-        "trades_cached": len(rows),
-        "mom1_bps": mom1_bps,
-        "dcvd_2m": dcvd_2m,
-    }
-    return _sanitize(sig)
-
+        return {
+            "mom1_bps":       mom1,
+            "mom5_bps":       mom5,
+            "rvol_vs_recent": rvol,
+            "px_vs_vwap_bps": pxvv,
+            "best_bid":       bid,
+            "best_ask":       ask,
+            "last_price":     lp,
+            "trades_cached":  len(list(trades.get(symbol, []))),
+        }
+    except Exception:
+        # Never blow up the endpoint—return safe defaults
+        return {
+            "mom1_bps":       0.0,
+            "mom5_bps":       0.0,
+            "rvol_vs_recent": 0.0,
+            "px_vs_vwap_bps": 0.0,
+            "best_bid":       None,
+            "best_ask":       None,
+            "last_price":     None,
+            "trades_cached":  0,
+        }
 
 from .bars import build_bars, atr as bars_atr, px_vs_vwap_bps, momentum_bps, rvol_ratio
 
