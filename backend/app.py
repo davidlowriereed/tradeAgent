@@ -426,8 +426,33 @@ async def run_now(
 # Liquidity
 # ---------------------------------------------------------
 
+# backend/app.py
 @app.get("/liquidity")
-async def liquidity_state():
-    from .liquidity import get_liquidity_state
-    risk_on, score = get_liquidity_state()
-    return {"risk_on": bool(risk_on), "liquidity_score": float(score)}
+async def liquidity():
+    from .state import get_best_quotes, get_last_price
+    import math
+
+    score = None
+    risk_on = False
+    detail = "no quotes"
+
+    # Pull quotes or synthesize from last price
+    b,a = (None, None)
+    q = get_best_quotes("BTC-USD")  # or loop symbols and return a dict
+    if q: b,a = q
+    lp = get_last_price("BTC-USD")
+
+    if (isinstance(b,(int,float)) and isinstance(a,(int,float)) and math.isfinite(b) and math.isfinite(a)):
+        spread = max(0.0, float(a) - float(b))
+        mid = (a + b)/2.0
+        spread_bps = (spread / max(mid,1e-9)) * 1e4
+        # Simple scoring: tighter spreads => higher score
+        # 0–5 bps => 100, 10 bps => 50, 25 bps => 0
+        score = max(0, min(100, 100 - (spread_bps*4)))
+        risk_on = spread_bps <= 8
+        detail = f"spread_bps={spread_bps:.1f}"
+    elif isinstance(lp,(int,float)):
+        # fallback: no quotes, but we can’t compute spread meaningfully
+        detail = "no best bid/ask; using last price only"
+
+    return {"risk_on": bool(risk_on), "liquidity_score": int(score) if score is not None else None, "detail": detail}
