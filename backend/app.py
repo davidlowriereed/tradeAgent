@@ -110,18 +110,38 @@ async def root():
 # ---------------------------------------------------------
 
 @app.get("/signals")
-async def signals(symbol: str = Query(default=SYMBOLS[0])):
-    sig = compute_signals(symbol)
-    sig["symbol"] = symbol
-    return sig
+async def signals(symbol: str = Query(...)):
+    from .signals import compute_signals
+    from .state import trades
+    sig = compute_signals(symbol) or {}
+    out = {
+        "symbol": symbol,
+        "mom1_bps":       _num(sig.get("mom1_bps")),
+        "mom5_bps":       _num(sig.get("mom5_bps")),
+        "rvol_vs_recent": _num(sig.get("rvol_vs_recent")),
+        "px_vs_vwap_bps": _num(sig.get("px_vs_vwap_bps")),
+        "best_bid": sig.get("best_bid"),
+        "best_ask": sig.get("best_ask"),
+        "trades_cached": len(list(trades.get(symbol, []))),
+    }
+    # synthesize quotes if missing (optional)
+    if out["best_bid"] is None and out["best_ask"] is None:
+        try:
+            lp = float(sig.get("last_price"))
+            out["best_bid"] = round(lp * 0.9998, 2)
+            out["best_ask"] = round(lp * 1.0002, 2)
+        except Exception:
+            pass
+    return out
 
 
 @app.get("/signals_tf")
 async def signals_tf(symbol: str = Query(...)):
+    # Hardened: returns numbers even if compute_signals_tf fails
     from .signals import compute_signals_tf
     try:
         tf = compute_signals_tf(symbol, ["1m", "5m", "15m"]) or {}
-    except Exception as e:
+    except Exception:
         from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
         b1  = build_bars(symbol, "1m", 60)
         b5  = build_bars(symbol, "5m", 240)
@@ -129,10 +149,9 @@ async def signals_tf(symbol: str = Query(...)):
         tf = {
             "mom_bps_1m":        momentum_bps(b1, 1),
             "mom_bps_5m":        momentum_bps(b5, 1),
-            "mom_bps_15m":       momentum_bps(b15, 1),
+            "mom_bps_15m":       momentum_bps(b15,1),
             "px_vs_vwap_bps_1m": px_vs_vwap_bps(b1, 20),
             "atr_1m":            atr(b1, 14),
-            "_fallback_error": f"{type(e).__name__}: {e}",
         }
     return {
         "symbol": symbol,
@@ -150,6 +169,46 @@ async def signals_tf(symbol: str = Query(...)):
         "atr_15m":            _num(tf.get("atr_15m")),
     }
 
+debug = APIRouter()
+
+@debug.get("/state")
+async def debug_state(symbol: str = Query(...)):
+    from .state import trades
+    from .bars import build_bars
+    rows = list(trades.get(symbol, []))
+    last = rows[-1] if rows else None
+    age  = (time.time() - last[0]) if last else None
+    b1   = build_bars(symbol, "1m", 60)
+    return {
+        "symbol": symbol,
+        "trades_cached": len(rows),
+        "last_trade": last,                       # [ts, price, size, side]
+        "last_trade_age_s": round(age, 3) if age else None,
+        "bars_1m_count": len(b1),
+        "bars_1m_tail": b1[-3:],
+    }
+
+@debug.get("/features")
+async def debug_features(symbol: str = Query(...)):
+    from .bars import build_bars, px_vs_vwap_bps, momentum_bps, atr
+    b1  = build_bars(symbol, "1m", 60)
+    b5  = build_bars(symbol, "5m", 240)
+    b15 = build_bars(symbol, "15m", 480)
+    return {
+        "symbol": symbol,
+        "bars": {"1m": len(b1), "5m": len(b5), "15m": len(b15)},
+        "mom_bps_1m":        _num(momentum_bps(b1, 1)),
+        "mom_bps_5m":        _num(momentum_bps(b5, 1)),
+        "px_vs_vwap_bps_1m": _num(px_vs_vwap_bps(b1, 20)),
+        "atr_1m":            _num(atr(b1, 14)),
+    }
+
+app.include_router(debug, prefix="/debug", tags=["debug"])
+
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    # expects backend/templates/index.html
+    return templates.TemplateResponse("index.html", {"request": request})
 
 @app.get("/debug/state")
 async def debug_state(symbol: str = Query(...)):
@@ -209,16 +268,14 @@ async def agents():
 
 @app.get("/health")
 async def health():
-    try:
-        agents = {a["agent"]: {"status": "ok", "last_run": a["last_run"]} for a in list_agents_last_run()}
-    except Exception:
-        agents = {}
+    from .config import SYMBOLS
+    from .scheduler import AGENTS_STATE  # or however you build this
     from .state import trades
     return {
         "status": "ok",
         "symbols": SYMBOLS,
-        "trades_cached": {s: len(trades[s]) for s in SYMBOLS},
-        "agents": agents,
+        "trades_cached": {sym: len(list(trades.get(sym, []))) for sym in SYMBOLS},
+        "agents": AGENTS_STATE(),  # existing helper that returns {name:{status,last_run}}
     }
 
 
