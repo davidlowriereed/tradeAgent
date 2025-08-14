@@ -95,36 +95,29 @@ def momentum_bps(bars: List[dict], lookback: int = 1) -> float:
     except ZeroDivisionError:
         return 0.0
 
-def _f(x, default: float = 0.0) -> float:
-    """Coerce to finite float; return default on error/NaN/inf."""
+def _f(x, default=0.0):
     try:
-        v = float(x)
+        v = float(x); 
         return v if math.isfinite(v) else default
     except Exception:
         return default
 
 def rvol_ratio(bars: List[Dict], win: int = 5, baseline: int = 20) -> float:
-    """
-    Relative volume of the most recent `win` bars vs the preceding `baseline` bars.
-    - Coerces volumes to floats
-    - Ignores negatives
-    - Uses epsilon to avoid division-by-zero
-    - Always returns a finite float
-    """
     n = len(bars)
-    if n < (win + baseline) or win <= 0 or baseline <= 0:
+    if win <= 0 or baseline <= 0 or n < 2:
         return 0.0
 
-    def vol(b) -> float:
-        v = _f(b.get("v", 0.0))
-        return v if v > 0.0 else 0.0
+    # Use as much history as we have; require at least 2 bars in each slice
+    base_n = max(2, min(baseline, max(0, n - win)))
+    if base_n < 2:
+        return 0.0
 
-    recent_slice = bars[-win:]
-    base_slice   = bars[-(win + baseline):-win]
+    recent = bars[-win:] if n >= win else bars[:]  # partial recent if needed
+    base   = bars[-(win + base_n):-win] if n >= (win + 2) else bars[:-len(recent)]
 
-    v_recent = sum(vol(b) for b in recent_slice)
-    v_base   = sum(vol(b) for b in base_slice)
+    def vol(slice_):
+        return sum(max(0.0, _f(b.get("v", 0))) for b in slice_) or 0.0
 
-    # Avoid zero/near-zero baseline (prevents inf/NaN)
-    ratio = v_recent / max(v_base, 1e-9)
-    return float(ratio) if math.isfinite(ratio) else 0.0
+    v_recent = vol(recent)
+    v_base   = vol(base)
+    return float(v_recent / max(v_base, 1e-9))
