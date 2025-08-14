@@ -1,7 +1,7 @@
 # backend/signals.py
 import time, math, statistics
 from typing import List, Tuple, Optional
-from .state import trades, best_px
+from .state import trades, best_px, get_best_quote
 
 def _finite(x: Optional[float]):
     return (x if isinstance(x, (int, float)) and math.isfinite(x) else None)
@@ -43,7 +43,9 @@ def compute_signals(symbol: str) -> dict:
     recent5 = _last_n_minutes(symbol, 300)   # 5 min
     recent1 = _last_n_minutes(symbol, 60)    # 1 min
     recent2 = _last_n_minutes(symbol, 120)   # 2 min
-
+    rows = trades.get(symbol, [])
+    cvd = 0.0
+    vol5 = 0.0
     # 5m volume
     vol5 = sum(sz for _, _, sz, _, _, _ in recent5)
 
@@ -77,14 +79,14 @@ def compute_signals(symbol: str) -> dict:
     # CVD over the whole cache (visible to the dashboard card)
     cvd_total = signed_sum(trades[symbol])
 
-    bid, ask = best_px(symbol)
+    best_bid, best_ask = get_best_quote(symbol)
     return {
-        "cvd": round(cvd_total, 6),
+        "cvd": cvd,
         "volume_5m": vol5,
-        "rvol_vs_recent": round(rvol, 2),
-        "best_bid": bid,
-        "best_ask": ask,
-        "trades_cached": len(trades[symbol]),
+        "rvol_vs_recent": rvol,        # your existing variable
+        "best_bid": best_bid,          # <- not None once quotes arrive
+        "best_ask": best_ask,
+        "trades_cached": len(rows),
         "mom1_bps": mom1_bps,
         "dcvd_2m": dcvd_2m,
     }
