@@ -6,15 +6,7 @@ from ..config import SYMBOLS
 from ..state import trades, best_px, record_trade
 import asyncio, random
 
-record_trade(
-    symbol=symbol,
-    price=trade_price,
-    size=trade_size,
-    side=("buy" if is_buy else "sell"),
-    bid=best_bid_value,      # pass None if you don’t have it on this event
-    ask=best_ask_value,      # pass None if you don’t have it on this event
-    ts=event_ts_in_seconds   # optional
-)
+
 
 async def market_loop():
     """
