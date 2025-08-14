@@ -12,6 +12,7 @@ from .scheduler import agents_loop, AGENTS
 from .services.market import market_loop
 from . import state as pos_state
 import traceback
+from fastapi import Query
 
 # --- CREATE APP FIRST ---
 app = FastAPI()
@@ -34,21 +35,25 @@ async def _startup():
 
 # ----- Routes -----
 
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    here = os.path.dirname(__file__)
-    index_path = os.path.join(here, "templates", "index.html")
-    try:
-        with open(index_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
-    except Exception as e:
-        return HTMLResponse(
-            "<h3>Opportunity Radar (Alpha)</h3>"
-            "<p>See <a href='/signals'>/signals</a>, "
-            "<a href='/findings'>/findings</a>, "
-            "<a href='/health'>/health</a></p>"
-            f"<pre style='color:#b00'>index error: {e}</pre>"
-        )
+@app.get("/debug/state")
+async def debug_state(symbol: str = Query(...)):
+    from .state import trades, quotes
+    from .bars import build_bars
+    import time
+
+    rows = list(trades.get(symbol, []))
+    bars1 = build_bars(symbol, tf="1m", lookback_min=45)
+    last_ts = rows[-1][0] if rows else None
+    age_s = (time.time() - last_ts) if last_ts else None
+
+    return {
+        "symbol": symbol,
+        "trades_cached": len(rows),
+        "last_trade": rows[-1] if rows else None,     # [ts, price, size, side]
+        "last_trade_age_s": round(age_s, 2) if age_s is not None else None,
+        "bars_1m_count": len(bars1),
+        "bars_1m_tail": bars1[-3:],
+    }
 
 def _num(x, default=0.0):
     try:
