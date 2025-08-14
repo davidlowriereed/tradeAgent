@@ -3,85 +3,122 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Opportunity Radar (Alpha)</title>
+  <title>Opportunity Radar — Dashboard</title>
   <style>
     :root{
       --bg:#0f1115;--card:#171a21;--muted:#9aa4b2;--text:#e8edf2;--ok:#38d39f;--warn:#f5c451;--bad:#ff6b6b;--blue:#5aa2ff;
+      --line:#2a2f3a;
     }
     *{box-sizing:border-box}
-    body{margin:16px;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
-    header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-    h1{font-size:20px;margin:0 8px 0 0}
-    select,button{background:#0e1117;color:var(--text);border:1px solid #2a2f3a;border-radius:8px;padding:8px 10px}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px;margin:16px 0}
-    .card{background:var(--card);border:1px solid #222636;border-radius:12px;padding:12px;min-height:76px}
-    .title{font-size:12px;color:var(--muted);letter-spacing:.3px;text-transform:uppercase}
-    .big{font-size:20px;margin-top:6px;word-break:break-word}
-    .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
-    .section{margin-top:8px}
-    #findings{height:360px;overflow:auto;border:1px solid #222636;border-radius:12px;background:var(--card);padding:8px}
-    .finding{padding:10px 8px;border-bottom:1px solid #222636}
-    .finding:last-child{border-bottom:none}
-    .label{font-weight:600;color:var(--blue)}
+    body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
+    header, footer{position:sticky;z-index:5;background:linear-gradient(180deg,var(--bg),#0f1115f0);backdrop-filter: blur(2px);}
+    header{top:0;border-bottom:1px solid var(--line);padding:10px 14px}
+    footer{bottom:0;border-top:1px solid var(--line);padding:10px 14px}
+    .wrap{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    h1{font-size:18px;margin:0 8px 0 0}
+    select,button,input{background:#0e1117;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+    button{cursor:pointer}
+    main{height:calc(100vh - 178px); /* header + footer approx */ overflow:auto; padding:10px 14px;}
+    .cards{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:10px}
+    .card{background:var(--card);border:1px solid var(--line);padding:12px;border-radius:12px;box-shadow:0 0 0 1px rgba(255,255,255,0.02) inset}
+    .title{font-weight:600;margin-bottom:6px}
     .muted{color:var(--muted)}
-    .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid #2a2f3a;color:var(--muted);margin-left:6px}
-    .ok{color:var(--ok)} .stale{color:var(--warn)} .down{color:var(--bad)}
-    .health{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px}
-    .agent{background:var(--card);border:1px solid #222636;border-radius:12px;padding:10px}
-    .mono{font-family: ui-monospace,SFMono-Regular,Menlo,monospace}
-    a{color:#8bb3ff;text-decoration:none}
-    /* action pills */
-    .pill-chip{display:inline-block;padding:2px 8px;border-radius:9999px;font-weight:600;font-size:12px;line-height:18px;border:1px solid transparent;margin-left:4px}
-    .pill-green{color:rgb(16,185,129);background:rgba(16,185,129,.15);border-color:rgba(16,185,129,.3)}
-    .pill-red{color:rgb(239,68,68);background:rgba(239,68,68,.18);border-color:rgba(239,68,68,.3)}
-    .pill-yellow{color:rgb(234,179,8);background:rgba(234,179,8,.18);border-color:rgba(234,179,8,.35)}
-    .pill-blue{color:rgb(59,130,246);background:rgba(59,130,246,.15);border-color:rgba(59,130,246,.3)}
-    .dim{opacity:.7}
-    @media (max-width:980px){ .grid,.health{grid-template-columns:repeat(2,minmax(220px,1fr));} }
-    @media (max-width:620px){ .grid,.health{grid-template-columns:1fr;} }
+    .big{font-size:24px;font-weight:700}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;border:1px solid var(--line);gap:6px}
+    .pill.ok{background:#10291f;border-color:#204d3c;color:#8be8be}
+    .pill.bad{background:#321619;border-color:#5b1e26;color:#ff9aa5}
+    .pill.warn{background:#332a14;border-color:#6b5214;color:#ffd77a}
+    .health{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px}
+    .agent{background:var(--card);border:1px solid var(--line);padding:10px;border-radius:10px}
+    .agent .ok{color:var(--ok)} .agent .stale{color:var(--bad)}
+    .finding{border-bottom:1px dashed var(--line);padding:10px 6px}
+    .finding:last-child{border-bottom:none}
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .top-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 10px}
   </style>
 </head>
 <body>
-  <header>
-    <h1>Opportunity Radar (Alpha)</h1>
-    <select id="symbol"></select>
-    <a id="csv" class="pill" href="#">export csv</a>
-    <span class="muted">API: <a href="/signals">/signals</a> · <a href="/findings">/findings</a> · <a href="/health">/health</a></span>
-  </header>
 
-  <section class="grid" id="metrics">
+<header>
+  <div class="wrap">
+    <h1>Opportunity Radar</h1>
+    <label class="muted">Symbol</label>
+    <select id="symbol"></select>
+    <label class="muted">Auto-refresh</label>
+    <select id="refresh">
+      <option value="3">3s</option>
+      <option value="5" selected>5s</option>
+      <option value="10">10s</option>
+      <option value="30">30s</option>
+    </select>
+    <button id="run">Run agents now</button>
+    <span class="muted" id="status"></span>
+    <span style="flex:1"></span>
+    <a id="csv" href="#" class="pill"><span>⬇</span><span>Export CSV</span></a>
+  </div>
+
+  <div class="cards" style="margin-top:8px">
     <div class="card">
-      <div class="title">Cumulative Volume Delta (CVD)</div>
-      <div class="big mono" id="cvd">0</div>
+      <div class="title">Trend Score (p_up)</div>
+      <div class="big mono" id="p_up">—</div>
+      <div class="muted mono" id="p_breakdown">p_1m=— · p_5m=— · p_15m=—</div>
     </div>
     <div class="card">
-      <div class="title">5-min Volume</div>
-      <div class="big mono" id="vol5">0</div>
-      <div class="muted">RVOL vs recent: <span class="mono" id="rvol">0.00x</span></div>
+      <div class="title">Price vs VWAP (bps)</div>
+      <div class="big mono" id="pxv">—</div>
+      <div class="muted">1m window</div>
     </div>
     <div class="card">
-      <div class="title">Best Bid / Ask</div>
-      <div class="big mono" id="ba">- / -</div>
+      <div class="title">Momentum</div>
+      <div class="row">
+        <div><div class="muted">1m</div><div class="big mono" id="mom1">—</div></div>
+        <div><div class="muted">5m</div><div class="big mono" id="mom5">—</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="title">RVOL (5 vs 20)</div>
+      <div class="big mono" id="rvol">—</div>
+      <div class="muted">bar-based</div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="title" style="margin:6px 0 8px 4px;">Latest Findings</div>
+  <div id="findings"></div>
+</main>
+
+<footer>
+  <div class="cards">
+    <div class="card">
+      <div class="title">Top of Book</div>
+      <div class="row mono"><div>Bid</div><div id="bb">—</div></div>
+      <div class="row mono"><div>Ask</div><div id="ba">—</div></div>
     </div>
     <div class="card">
       <div class="title">Trades Cached</div>
       <div class="big mono" id="cached">0</div>
     </div>
-  </section>
+    <div class="card">
+      <div class="title">Liquidity</div>
+      <div id="liq" class="pill"><span>⏳</span><span>Loading…</span></div>
+    </div>
+    <div class="card">
+      <div class="title">LLM Netcheck</div>
+      <div id="net" class="pill"><span>⏳</span><span>Checking…</span></div>
+    </div>
+  </div>
 
-  <section class="section">
-    <div class="title" style="margin:6px 0 8px 4px;">Latest Findings</div>
-    <div id="findings"></div>
-  </section>
-
-  <section class="section">
-    <div class="title" style="margin:12px 0 8px 4px;">Agent Health</div>
-    <div class="health" id="health"></div>
-  </section>
+  <div class="title" style="margin:12px 0 8px 4px;">Agent Health</div>
+  <div class="health" id="health"></div>
+</footer>
 
 <script>
 const $ = sel => document.querySelector(sel);
-const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "-" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
+const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "—" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
 const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t.getTime())/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
 const esc = s => String(s ?? '').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
@@ -91,66 +128,109 @@ function clearTimers(){ timers.forEach(clearInterval); timers=[]; }
 async function init(){
   const h = await (await fetch('/health')).json();
   SYMBOLS = h.symbols || [];
-  const sel = $('#symbol');
-  sel.innerHTML = SYMBOLS.map(s=>`<option value="${s}">${s}</option>`).join('');
-  current = sel.value = (SYMBOLS[0] || 'BTC-USD');
-  sel.addEventListener('change', ()=>{ current = sel.value; boot(); });
-  boot();
+  const sel = $('#symbol'); sel.innerHTML = SYMBOLS.map(s=>`<option>${s}</option>`).join('');
+  current = SYMBOLS[0] || null;
+  sel.value = current;
+  $('#csv').href = `/export-csv?symbol=${encodeURIComponent(current)}&limit=500`;
+  $('#refresh').addEventListener('change', resetLoops);
+  $('#symbol').addEventListener('change', e=>{ current=e.target.value; $('#csv').href=`/export-csv?symbol=${encodeURIComponent(current)}&limit=500`; resetLoops(); });
+  $('#run').addEventListener('click', runAgentsNow);
+  resetLoops();
 }
 
-function boot(){
+function resetLoops(){
   clearTimers();
-  $('#csv').href = `/export-csv?symbol=${encodeURIComponent(current)}&limit=1000`;
-  pullSignals(); pullFindings(); pullHealth();
-  timers.push(setInterval(pullSignals, 3000));
-  timers.push(setInterval(pullFindings, 3000));
-  timers.push(setInterval(pullHealth, 5000));
+  const iv = (+$('#refresh').value||5)*1000;
+  fetchTop(); fetchFindings(); fetchHealth(); netcheck(); fetchLiquidity();
+  timers.push(setInterval(fetchTop, iv));
+  timers.push(setInterval(fetchFindings, iv));
+  timers.push(setInterval(fetchHealth, 15000));
+  timers.push(setInterval(netcheck, 30000));
+  timers.push(setInterval(fetchLiquidity, 60000));
 }
 
-async function pullSignals(){
+async function runAgentsNow(){
+  $('#status').textContent = 'Running…';
   try{
-    const s = await (await fetch(`/signals?symbol=${encodeURIComponent(current)}`)).json();
-    $('#cvd').textContent = fmtNum(s.cvd,4);
-    $('#vol5').textContent = fmtNum(s.volume_5m,2);
-    $('#rvol').textContent = (s.rvol_vs_recent==null? '0.00x' : fmtNum(s.rvol_vs_recent,2)+'x');
-    $('#ba').textContent = `${fmtNum(s.best_bid,2)} / ${fmtNum(s.best_ask,2)}`;
-    $('#cached').textContent = fmtNum(s.trades_cached,0);
+    const r = await fetch('/agents/run-now', {method:'POST'});
+    if(!r.ok) throw new Error(await r.text());
+    $('#status').textContent = 'Agents run';
+    setTimeout(()=>$('#status').textContent='', 2500);
+  }catch(e){
+    console.error(e); $('#status').textContent = 'Run failed';
+  }
+}
+
+async function netcheck(){
+  try{
+    const r = await fetch('/llm/netcheck');
+    const ok = r.ok;
+    $('#net').className = 'pill ' + (ok?'ok':'bad');
+    $('#net').innerHTML = ok ? '<span>✅</span><span>OpenAI OK</span>' : '<span>⚠️</span><span>OpenAI unreachable</span>';
+  }catch(e){
+    $('#net').className = 'pill bad';
+    $('#net').innerHTML = '<span>⚠️</span><span>OpenAI unreachable</span>';
+  }
+}
+
+async function fetchLiquidity(){
+  try{
+    const r = await fetch('/liquidity');
+    const j = await r.json();
+    const cls = j.risk_on ? 'ok' : 'warn';
+    $('#liq').className = 'pill '+cls;
+    $('#liq').innerHTML = j.error ? `<span>⚠️</span><span>Error</span>` : (j.risk_on ? '<span>✅</span><span>Risk-on</span>' : '<span>⚠️</span><span>Risk-off</span>');
+  }catch(e){
+    $('#liq').className = 'pill bad';
+    $('#liq').innerHTML = '<span>⚠️</span><span>Unavailable</span>';
+  }
+}
+
+async function fetchTop(){
+  if(!current) return;
+  try{
+    // legacy signals (best bid/ask, rvol, mom1, cache size)
+    const sig = await (await fetch(`/signals?symbol=${encodeURIComponent(current)}`)).json();
+    $('#bb').textContent = fmtNum(sig.best_bid, 2);
+    $('#ba').textContent = fmtNum(sig.best_ask, 2);
+    $('#cached').textContent = fmtNum(sig.trades_cached, 0);
+    $('#mom1').textContent = fmtNum(sig.mom1_bps, 1);
+    $('#rvol').textContent = fmtNum(sig.rvol_vs_recent, 2);
+
+    // bars-based per-TF signals
+    const tf = await (await fetch(`/signals_tf?symbol=${encodeURIComponent(current)}`)).json();
+    $('#mom5').textContent = fmtNum(tf.mom_bps_5m, 1);
+    $('#pxv').textContent = fmtNum(tf.px_vs_vwap_bps_1m, 1);
+
+    // update trend score numbers from latest findings
+    const findings = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=5`)).json();
+    const list = Array.isArray(findings.findings)? findings.findings : [];
+    const ts = list.find(x => x.agent === 'trend_score');
+    if (ts && ts.details){
+      const d = ts.details;
+      $('#p_up').textContent = fmtNum(d.p_up, 3);
+      $('#p_breakdown').textContent = `p_1m=${fmtNum(d.p_1m,3)} · p_5m=${fmtNum(d.p_5m,3)} · p_15m=${fmtNum(d.p_15m,3)}`;
+    }
   }catch(e){ console.error(e); }
 }
 
-// colored action chip
-function actionPill(action){
-  const a = (action||'').toLowerCase();
-  const cls = (a.includes('exit')||a.includes('reduce')||a.includes('close')||a.includes('reverse')) ? 'pill-red'
-           : (a.includes('enter')||a.includes('continue')||a.includes('consider-entry')) ? 'pill-green'
-           : (a.includes('observe')||a.includes('hold')||a.includes('wait')) ? 'pill-yellow'
-           : 'pill-blue';
-  return `<span class="pill ${cls}">${esc(action)}</span>`;
+function actionPill(act){
+  const m = {observe:'', prepare:'', 'consider-entry':'ok', 'consider-exit':'warn'};
+  const cls = m[act]||'';
+  return `<span class="pill ${cls}">${esc(act)}</span>`;
 }
 
 function renderFinding(f){
-  const d = f.details || {};
-  let header = `<span class="label">${esc(f.agent)}</span> · <span class="muted">${esc(f.label)}</span> · <span class="muted">score ${fmtNum(f.score,2)}</span>`;
-  header += ` <span class="pill muted">${esc(f.ts_utc)}</span>`;
+  const d = f.details||{};
+  const header = `<b>${esc(f.agent)}</b> • <span class="mono">${fmtNum(f.score,1)}</span> • <span class="muted mono">${new Date(f.ts_utc).toLocaleTimeString()}</span>`;
 
-  // 1) pretty LLM error
-  if (f.agent==='llm_analyst' && f.label==='llm_error'){
-    const raw = esc((d.raw||'').slice(0,300));
-    const err = esc(d.error||'LLM parse error');
-    return `<div class="finding">
-      <div>${header}</div>
-      <div class="muted" style="margin-top:4px"><b>LLM error:</b> ${err}</div>
-      ${raw ? `<pre class="muted" style="white-space:pre-wrap;margin-top:4px">${raw}</pre>` : ''}
-    </div>`;
-  }
-
-  // 2) normal LLM analysis with colored pill
-  if (f.agent==='llm_analyst' && d.action){
-    const tweaks = Array.isArray(d.tweaks) && d.tweaks.length
-      ? `<ul style="margin:6px 0 0 16px">${d.tweaks.slice(0,5).map(t=>`<li class="muted">${esc(t)}</li>`).join('')}</ul>` : '';
-    return `<div class="finding">
-      <div>${header}</div>
-      <div style="margin:6px 0 0 2px"><b>Action:</b> ${actionPill(d.action)} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
+  if (f.agent==='llm_analyst'){
+    let tweaks = '';
+    if (Array.isArray(d.tweaks) && d.tweaks.length){
+      tweaks = '<div class="muted" style="margin-top:4px">'+d.tweaks.slice(0,3).map(t=>`${esc(t.param)} ${t.delta>0?'+':''}${fmtNum(t.delta,2)} (${esc(t.reason||'')})`).join(' · ')+'</div>';
+    }
+    return `<div class="finding"><div>${header}</div>
+      <div><b>Action:</b> ${actionPill(d.action||'observe')} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
       ${d.rationale ? `<div class="muted" style="margin:4px 0 0 2px">${esc(d.rationale)}</div>` : ''}
       ${tweaks}
     </div>`;
@@ -165,38 +245,45 @@ function renderFinding(f){
 
   if (f.agent==='rvol_spike'){
     return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">RVOL=${fmtNum((d||{}).rvol,2)} Vol5=${fmtNum((d||{}).volume_5m,0)}</div>
+      <div class="muted" style="margin-top:4px">RVOL=${fmtNum(d.rvol_1m5_vs20 ?? d.rvol,2)} · mom1=${fmtNum(d.mom_bps_1m,1)} · px-vwap=${fmtNum(d.px_vs_vwap_bps_1m,1)}</div>
     </div>`;
   }
 
-  if (f.agent==='cvd_divergence'){
+  if (f.agent==='cvd_divergence' || f.agent==='cvd_div_bearish' || f.agent==='cvd_div_bullish'){
+    const lab = f.agent.includes('bearish')?'Bearish':'Bullish';
     return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">ΔCVD(5m)=${fmtNum((d||{}).delta_5m,2)}</div>
+      <div class="muted" style="margin-top:4px">${lab} price/CVD divergence</div>
     </div>`;
   }
 
-  if (f.agent==='posture_guard' && d.action){
+  if (f.agent==='posture_guard' || f.agent==='posture_exit'){
     return `<div class="finding"><div>${header}</div>
-      <div><b>Action:</b> ${actionPill(d.action)} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
+      <div><b>Action:</b> ${actionPill(d.action||'consider-exit')} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
     </div>`;
   }
 
-  return `<div class="finding"><div>${header}</div>
-    <div class="muted mono" style="margin-top:4px">${esc(JSON.stringify(d))}</div>
-  </div>`;
+  if (f.agent==='session_reversal' || f.agent==='open_drive_reversal'){
+    return `<div class="finding"><div>${header}</div>
+      <div class="muted" style="margin-top:4px">Reversal prototype hit (ATR impulse + failure)</div>
+    </div>`;
+  }
+
+  return `<div class="finding"><div>${header}</div></div>`;
 }
 
-async function pullFindings(){
+async function fetchFindings(){
   try{
-    const res = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=80`)).json();
-    $('#findings').innerHTML = (res.findings||[]).map(renderFinding).join('');
+    const res = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=50`)).json();
+    const list = Array.isArray(res.findings)? res.findings : [];
+    $('#findings').innerHTML = list.map(renderFinding).join('') || '<div class="muted">No findings yet.</div>';
   }catch(e){ console.error(e); }
 }
 
-async function pullHealth(){
+async function fetchHealth(){
   try{
-    const h = await (await fetch('/health')).json();
-    const now = Date.now(), stale=120;
+    const h = await (await fetch('/agents')).json();
+    const now = Date.now();
+    const stale = 60;
     $('#health').innerHTML = Object.entries(h.agents||{}).map(([agent,obj])=>{
       const age = obj.last_run ? (now-new Date(obj.last_run).getTime())/1000 : 9e9;
       const cls = age>stale ? 'stale' : 'ok';

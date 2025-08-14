@@ -3,7 +3,7 @@ import time, asyncio
 from collections import defaultdict
 from typing import List, Tuple
 
-from .config import (SYMBOLS, SLACK_ANALYSIS_ONLY, ALERT_WEBHOOK_URL, ALERT_VERBOSE,
+from .config import (SYMBOLS, SLACK_ANALYSIS_ONLY, ALERT_WEBHOOK_URL, ALERT_VERBOSE, FEATURE_REVERSAL,
                      TS_ENTRY, TS_EXIT, TS_PERSIST, LLM_ANALYST_MIN_SCORE)
 from .signals import compute_signals
 from .state import POSTURE_STATE, trades
@@ -14,18 +14,17 @@ from .agents.rvol_spike import RVOLSpikeAgent
 from .agents.cvd_divergence import CvdDivergenceAgent
 from .agents.trend_score import TrendScoreAgent
 from .agents.llm_analyst import LLMAnalystAgent
+from .agents.session_reversal import SessionReversalAgent
+from .agents.opening_drive import OpeningDriveReversalAgent
 from .agents.posture_guard import PostureGuardAgent
 from backend.agents.macro_watcher import MacroWatcherAgent
 
-AGENTS = [
+AGENTS: list[Agent] = [
     RVOLSpikeAgent(),
     CvdDivergenceAgent(),
     TrendScoreAgent(),
     LLMAnalystAgent(),
-    PostureGuardAgent(),
-    MacroWatcherAgent(),
-]
-
+] + ([SessionReversalAgent(), OpeningDriveReversalAgent()] if FEATURE_REVERSAL else [])
 _last_run_ts: dict[tuple, float] = defaultdict(lambda: 0.0)
 
 async def agents_loop():

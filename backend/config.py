@@ -47,3 +47,23 @@ TS_WEIGHTS = os.getenv("TS_WEIGHTS", "default")
 TS_MTF_WEIGHTS = os.getenv("TS_MTF_WEIGHTS", "default")
 
 POSTURE_GUARD_INTERVAL = int(os.getenv("POSTURE_GUARD_INTERVAL", "60"))
+
+# --- Runtime mode & feature flags ---
+MODE = os.getenv("MODE", "realtime")  # "realtime" | "backtest"
+FEATURE_BARS = os.getenv("FEATURE_BARS", "true").lower() == "true"
+FEATURE_NEW_TREND = os.getenv("FEATURE_NEW_TREND", "true").lower() == "true"
+FEATURE_REVERSAL = os.getenv("FEATURE_REVERSAL", "false").lower() == "true"
+FEATURE_LIQUIDITY = os.getenv("FEATURE_LIQUIDITY", "false").lower() == "true"
+
+# Posture / guard thresholds (env-driven, with sane defaults)
+POSTURE_ENTRY_CONF = float(os.getenv("POSTURE_ENTRY_CONF", "0.60"))
+PG_CVD_5M_NEG = float(os.getenv("PG_CVD_5M_NEG", "1500"))
+PG_CVD_2M_NEG = float(os.getenv("PG_CVD_2M_NEG", "800"))
+PG_RVOL_RATIO = float(os.getenv("PG_RVOL_RATIO", "1.2"))
+PG_PUSH_RVOL_MIN = float(os.getenv("PG_PUSH_RVOL_MIN", "0.70"))
+PG_MOM5_DOWN_BPS = float(os.getenv("PG_MOM5_DOWN_BPS", "-8"))
+PG_VWAP_MINUTES = int(os.getenv("PG_VWAP_MINUTES", "20"))
+POSTURE_MAX_AGE_MIN = int(os.getenv("POSTURE_MAX_AGE_MIN", "30"))
+PG_PERSIST_K = int(os.getenv("PG_PERSIST_K", "5"))
+PG_DD_SLOW_BPS = float(os.getenv("PG_DD_SLOW_BPS", "-60"))
+
