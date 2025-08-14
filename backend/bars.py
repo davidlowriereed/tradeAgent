@@ -1,0 +1,6 @@
+# backend/bars.py (sketch)
+def build_bars(symbol, tf="1m", lookback_min=60):
+    # bucket trades -> OHLCV, compute vwap, atr per tf
+    return bars_df_or_list
+def anchored_vwap(bars, anchor_index=0): ...
+def atr(bars, period=14): ...
