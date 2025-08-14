@@ -1,6 +1,6 @@
 # backend/state.py
 from collections import defaultdict, deque
-from typing import Deque, Dict, Tuple, Optional. Any
+from typing import Deque, Dict, Tuple, Optional, Any
 from __future__ import annotations
 from .db import pg_exec, pg_fetchone
 import time
