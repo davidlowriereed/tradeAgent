@@ -1,6 +1,14 @@
 
 import os
 
+def _f(key: str, default: float) -> float:
+    try: return float(os.getenv(key, str(default)))
+    except Exception: return float(default)
+
+def _i(key: str, default: int) -> int:
+    try: return int(float(os.getenv(key, str(default))))
+    except Exception: return int(default)
+
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").split(",") if s.strip()]
 
 # Slack / alerts
@@ -67,13 +75,7 @@ PG_VWAP_MINUTES      = _i("PG_VWAP_MINUTES", 20)
 POSTURE_MAX_AGE_MIN  = _i("POSTURE_MAX_AGE_MIN", 30)
 PG_PERSIST_K         = _i("PG_PERSIST_K", 5)
 
-def _f(key: str, default: float) -> float:
-    try: return float(os.getenv(key, str(default)))
-    except Exception: return float(default)
 
-def _i(key: str, default: int) -> int:
-    try: return int(float(os.getenv(key, str(default))))
-    except Exception: return int(default)
 
 
 
