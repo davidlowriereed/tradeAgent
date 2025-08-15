@@ -129,14 +129,18 @@ async def agents_loop():
                             cnt = int(ps.get("_persist", 0))
 
                             if p_up >= float(TS_ENTRY):
-                                cnt = cnt + 1 if ps.get("status") == "long_bias" else cnt + 1
+                                if ps.get("status") == "long_bias":
+                                    cnt = max(1, cnt + 1)  # keep it at least 1 while in-trend
+                                else:
+                                    cnt = cnt + 1
                                 if cnt >= int(TS_PERSIST) and ps.get("status") != "long_bias":
                                     sig = compute_signals(sym)
                                     px = sig.get("best_ask") or sig.get("best_bid")
                                     now2 = time.time()
                                     # recent 5m window
                                     w5 = [r for r in trades.get(sym, []) if r[0] >= now2 - 300]
-                                    base_low = min((r[1] for r in w5), default=px or 0.0) or px
+                                    default_low = px if px is not None else 0.0
+                                    base_low = min((r[1] for r in w5), default=default_low)
                                     POSTURE_STATE[sym] = {
                                         "status": "long_bias",
                                         "started_at": now2,
@@ -148,7 +152,9 @@ async def agents_loop():
                                     }
                                 else:
                                     ps["_persist"] = cnt
-                                    POSTURE_STATE[sym] = ps or {"_persist": cnt}
+                                    if "status" not in ps:
+                                        ps["status"] = "flat"
+                                    POSTURE_STATE[sym] = ps
 
                             elif p_up <= float(TS_EXIT) and ps.get("status") == "long_bias":
                                 cnt = cnt + 1
