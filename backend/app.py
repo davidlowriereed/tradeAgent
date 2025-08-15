@@ -113,3 +113,8 @@ async def agents_run_now(names: str, symbol: str, insert: bool = True):
             except Exception as e:
                 results.append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
     return {"ok": True, "ran": ran, "results": results}
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    p = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    return HTMLResponse(open(p, "r", encoding="utf-8").read())
