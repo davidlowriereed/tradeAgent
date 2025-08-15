@@ -30,10 +30,10 @@ AGENTS: list[Agent] = [
 _last_run_ts: dict[tuple, float] = defaultdict(lambda: 0.0)
 
 AGENTS = [
-    RVOLSpikeAgent(interval_sec=5),
-    CVDDivergenceAgent(interval_sec=10),
-    TrendScoreAgent(interval_sec=15),   # <— ensure included
-    LLMAnalystAgent(interval_sec=60),   # <— ensure included (optional)
+    "rvol_spike": RVOLSpikeAgent(interval_sec=5),
+    "cvd_divergence": CVDDivergenceAgent(interval_sec=10),
+    "trend_score": TrendScoreAgent(interval_sec=15),   # <— ensure included
+    "llm_analyst": LLMAnalystAgent(interval_sec=60),   # <— ensure included (optional)
 ]
 
 def _iso(ts: float | int | None) -> str | None:
