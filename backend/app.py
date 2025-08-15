@@ -438,24 +438,19 @@ async def set_position(payload: dict = Body(...)):
 # Agent triggers
 # ---------------------------------------------------------
 
+from fastapi import Query
+from typing import Optional
+
+# ring buffer fallback
+from collections import deque
+from .state import RECENT_FINDINGS  # define as deque(maxlen=1000) in state.py
+
 @app.post("/agents/run-now")
-
-insert = request.query_params.get("insert", "false").lower() == "true"
-...
-res = await agent.run(symbol)
-if insert and res:
-    try:
-        from .db import insert_finding
-        insert_finding(res)
-        # (optional) also push into in-memory RECENT_FINDINGS ring buffer
-    except Exception:
-        pass
-
-async def run_now(
-    names: str | None = None,
-    agent: str | None = None,
-    symbol: str = Query(default=SYMBOLS[0]),
-    insert: bool = True
+async def agents_run_now(
+    names: Optional[str] = None,
+    agent: Optional[str] = None,
+    symbol: str = Query(...),
+    insert: bool = True,
 ):
     lookup = {a.name: a for a in AGENTS}
     if names:
@@ -470,7 +465,18 @@ async def run_now(
         try:
             f = await a.run_once(symbol)
             if f and insert:
-                insert_finding(a.name, symbol, float(f["score"]), f["label"], f.get("details") or {})
+                try:
+                    insert_finding(a.name, symbol, float(f["score"]), f["label"], f.get("details") or {})
+                except Exception:
+                    # DB down? Push to in-memory so /findings still shows it
+                    RECENT_FINDINGS.append({
+                        "ts_utc": f.get("ts_utc"),
+                        "agent": a.name,
+                        "symbol": symbol,
+                        "score": float(f["score"]),
+                        "label": f["label"],
+                        "details": f.get("details") or {},
+                    })
             results.append({"agent": a.name, "finding": f})
         except NotImplementedError as e:
             results.append({"agent": a.name, "error": f"NotImplementedError: {e}"})
