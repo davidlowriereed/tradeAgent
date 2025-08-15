@@ -16,6 +16,30 @@ out = {
   "rvol_15m":           _num(rvol_ratio(b15,5, 20)),
 }
 
+@app.get("/signals")
+async def signals(symbol: str = Query(...)):
+    from .signals import compute_signals
+    import math
+    def _num(x, default=0.0):
+        try:
+            v = float(x); 
+            return v if math.isfinite(v) else default
+        except Exception:
+            return default
+
+    sig = compute_signals(symbol) or {}
+    return {
+      "symbol": symbol,
+      "mom1_bps":       _num(sig.get("mom1_bps")),
+      "mom5_bps":       _num(sig.get("mom5_bps")),
+      "rvol_vs_recent": _num(sig.get("rvol_vs_recent")),
+      "px_vs_vwap_bps": _num(sig.get("px_vs_vwap_bps")),
+      "best_bid":       sig.get("best_bid"),
+      "best_ask":       sig.get("best_ask"),
+      "last_price":     sig.get("last_price"),
+      "trades_cached":  int(sig.get("trades_cached") or 0),
+    }
+
 def _num(x, default=0.0) -> float:
     try:
         v = float(x)
