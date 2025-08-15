@@ -1,9 +1,13 @@
 
 import time, json, asyncio
-import websockets
+try:
+    import websockets
+except Exception:
+    websockets = None  # optional
+
 from typing import Optional
 from ..config import SYMBOLS
-from ..state import trades, best_px, record_trade
+from ..state import trades, get_best_quotes, record_trade
 import asyncio, random
 
 

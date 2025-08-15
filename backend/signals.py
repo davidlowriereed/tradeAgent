@@ -4,6 +4,32 @@ from typing import Dict, Any, List
 from .state import trades, get_best_quotes, get_last_price
 from .bars import build_bars, momentum_bps, px_vs_vwap_bps, rvol_ratio, atr as bars_atr
 
+
+# --- compatibility helpers for legacy imports ---
+import time as _time
+from .state import trades as _trades
+
+def _dcvd(symbol: str, minutes: int = 5) -> float:
+    """Best-effort CVD over recent minutes: sum(buy sizes) - sum(sell sizes)."""
+    now = _time.time()
+    cutoff = now - minutes * 60.0
+    pos = 0.0
+    for (ts, price, size, side, bid, ask) in list(_trades.get(symbol, []))[-5000:]:
+        if ts >= cutoff:
+            if (side or '').lower().startswith('b'):
+                pos += float(size or 0.0)
+            elif (side or '').lower().startswith('s'):
+                pos -= float(size or 0.0)
+    return float(pos)
+
+def _mom_bps(symbol: str, tf: str = "5m", lookback: int = 1) -> float:
+    bars = build_bars(symbol, tf=tf, lookback_min=30)
+    try:
+        return float(momentum_bps(bars, lookback=lookback))
+    except Exception:
+        return 0.0
+# --- end compatibility helpers ---
+
 def _num(x, default=0.0) -> float:
     try:
         v = float(x)

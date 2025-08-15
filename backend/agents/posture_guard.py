@@ -1,6 +1,6 @@
 import time
 from typing import Optional
-from ..signals import compute_signals, _dcvd, _mom_bps
+from ..signals import compute_signals, _dcvd, _mom_bps  # shimmed in signals.py
 from ..bars import build_bars, atr, momentum_bps, rvol_ratio
 from ..state import trades, POSTURE_STATE
 from ..config import (
