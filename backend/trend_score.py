@@ -5,6 +5,8 @@ from typing import Optional, Dict, Any
 from ..signals import compute_signals, compute_signals_tf
 from ..config import TS_INTERVAL, TS_WEIGHTS, TS_MTF_WEIGHTS
 from .base import Agent
+import inspect, sys
+sys.stderr.write(f"[trend_score] loaded: {inspect.getsourcefile(sys.modules[__name__])}\n")
 
 def _tanh(x: float, s: float) -> float:
     try:
