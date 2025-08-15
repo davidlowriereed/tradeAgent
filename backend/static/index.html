@@ -280,7 +280,7 @@ async function refreshTiles() {
       const d = t.details || {}; const p = (d.p_up ?? 0.5);
       byId('trendScore').textContent = fmt(p*10,1);
       byId('trendSub').textContent = `p_1m=${fmt(d.p_1m??0.5,2)} · p_5m=${fmt(d.p_5m??0.5,2)} · p_15m=${fmt(d.p_15m??0.5,2)}`;
-      pushChart(charts.trend, new Date().toLocaleTimeString(), p);
+      pushLine(charts.trend, new Date().toLocaleTimeString(), p);
     }
   } catch {}
 
