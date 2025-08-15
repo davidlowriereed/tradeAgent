@@ -1,0 +1,12 @@
+# .github/workflows/req-lint.yml
+name: Lint requirements.txt
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure requirements.txt has only req lines
+        run: |
+          ! grep -nE '^\s*(git|sudo|apt|brew|echo|cat|#\!|<<|>|<|\||&)' requirements.txt || \
+            (echo "requirements.txt contains shell or non-requirements lines" && exit 1)
