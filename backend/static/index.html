@@ -121,20 +121,21 @@
     <!-- Charts -->
     <section class="charts" style="margin-top:16px">
       <div class="card span-6">
-        <h3>Momentum over time</h3>
+        <h3>Momentum — 1m / 5m / 15m</h3>
         <canvas id="chartMom"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>VWAP deviation (bps) — 1m / 5m / 15m</h3>
+        <canvas id="chartVWAP"></canvas>
       </div>
       <div class="card span-6">
         <h3>Trend score over time</h3>
         <canvas id="chartTrend"></canvas>
       </div>
       <div class="card span-6">
-        <h3>VWAP deviation (bps)</h3>
-        <canvas id="chartVWAP"></canvas>
-      </div>
-      <div class="card span-6">
-        <h3>RVOL over time</h3>
-        <canvas id="chartRVOL"></canvas>
+        <h3>TF alignment (momentum)</h3>
+        <div class="sub" id="alignText">mixed</div>
+        <canvas id="chartAlign"></canvas>
       </div>
     </section>
 
@@ -184,6 +185,14 @@ const byId = (id) => document.getElementById(id);
 
 // ======== Charts ========
 const tsFmt = (d) => new Date(d).toLocaleTimeString();
+const mkMultiLine = (ctx, labels) => new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: labels.map((l, i) => ({ label: l, data: [], tension:.25, pointRadius:0 })) },
+  options: { responsive:true, animation:false,
+    plugins:{ legend:{ display:true, labels:{ color:'#8b98b9' } } },
+    scales:{ x:{ ticks:{ color:'#8b98b9' } }, y:{ ticks:{ color:'#8b98b9' }, grid:{ color:'#202633' } } }
+  }
+});
 const mkLine = (ctx, label) => new Chart(ctx, {
   type: 'line',
   data: { labels: [], datasets: [{ label, data: [], tension:.25, pointRadius:0 }] },
@@ -192,15 +201,24 @@ const mkLine = (ctx, label) => new Chart(ctx, {
   }
 });
 const charts = {
-  mom:   mkLine(byId('chartMom').getContext('2d'), 'mom1_bps'),
+  mom:   mkMultiLine(byId('chartMom').getContext('2d'), ['1m','5m','15m']),
+  vwap:  mkMultiLine(byId('chartVWAP').getContext('2d'), ['1m','5m','15m']),
   trend: mkLine(byId('chartTrend').getContext('2d'), 'p_up'),
-  vwap:  mkLine(byId('chartVWAP').getContext('2d'), 'px_vs_vwap_bps_1m'),
-  rvol:  mkLine(byId('chartRVOL').getContext('2d'), 'rvol_1m')
+  align: new Chart(byId('chartAlign').getContext('2d'), {
+    type: 'bar', data: { labels: [], datasets: [{ label:'alignment', data:[] }] },
+    options: { responsive:true, animation:false, plugins:{ legend:{ display:false } },
+      scales:{ y:{ min:-1, max:1, ticks:{ stepSize:1, color:'#8b98b9' }, grid:{ color:'#202633' } }, x:{ ticks:{ display:false } } }
+    }
+  })
 };
-const pushChart = (c, label, val, max=120) => {
-  const ds = c.data.datasets[0];
-  c.data.labels.push(label);
-  ds.data.push(val);
+const pushMulti = (c, label, values, max=180) => {
+  const ds = c.data.datasets; c.data.labels.push(label);
+  values.forEach((v,i)=> ds[i].data.push(Number(v)||0));
+  if (ds[0].data.length > max) { ds.forEach(d=>d.data.shift()); c.data.labels.shift(); }
+  c.update();
+};
+const pushLine = (c, label, v, max=180) => {
+  const ds = c.data.datasets[0]; c.data.labels.push(label); ds.data.push(Number(v)||0);
   if (ds.data.length > max) { ds.data.shift(); c.data.labels.shift(); }
   c.update();
 };
@@ -277,9 +295,14 @@ async function refreshTiles() {
 
   // push charts for signals
   const now = new Date().toLocaleTimeString();
-  pushChart(charts.mom,  now, Number(tf.mom_bps_1m) || 0);
-  pushChart(charts.vwap, now, Number(tf.px_vs_vwap_bps_1m) || 0);
-  pushChart(charts.rvol, now, Number(tf.rvol_1m) || 1);
+  pushMulti(charts.mom,  now, [tf.mom_bps_1m, tf.mom_bps_5m, tf.mom_bps_15m]);
+  pushMulti(charts.vwap, now, [tf.px_vs_vwap_bps_1m, tf.px_vs_vwap_bps_5m, tf.px_vs_vwap_bps_15m]);
+  // alignment: +1 if all >0, -1 if all <0, else 0
+  const sgn = (x)=> (x>0?1:(x<0?-1:0));
+  const a = sgn(tf.mom_bps_1m||0) + sgn(tf.mom_bps_5m||0) + sgn(tf.mom_bps_15m||0);
+  const align = (a===3)?1:(a===-3?-1:0);
+  byId('alignText').textContent = (align===1? 'all up' : align===-1? 'all down' : 'mixed');
+  pushLine(charts.align, now, align);
 }
 
 async function refreshFindings() {
