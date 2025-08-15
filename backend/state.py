@@ -4,6 +4,7 @@ from collections import defaultdict, deque
 from typing import Deque, Dict, Tuple, Optional, Any
 from .db import pg_exec, pg_fetchone
 import time
+RECENT_FINDINGS = deque(maxlen=1000)
 
 # ------------------------------
 # Realtime market state (feeds)
@@ -11,6 +12,23 @@ import time
 
 # existing: trades, POSTURE_STATE, etc.
 # ensure trades exists
+
+@app.get("/health")
+async def health():
+    from .config import SYMBOLS
+    from .state import trades
+    try:
+        agents_map = list_agents_last_run()
+    except Exception:
+        agents_map = {}
+    return {
+        "status": "ok",
+        "symbols": SYMBOLS,
+        "trades_cached": {sym: len(list(trades.get(sym, []))) for sym in SYMBOLS},
+        "agents": agents_map,
+    }
+
+
 try:
     trades
 except NameError:
