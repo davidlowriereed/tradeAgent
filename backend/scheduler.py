@@ -10,7 +10,7 @@ from .config import (
 )
 from .signals import compute_signals
 from .state import POSTURE_STATE, trades, RECENT_FINDINGS
-from .db import connect_async, insert_finding, heartbeat, pg_conn
+from .db import connect_async, insert_finding, heartbeats, pg_conn
 from .services.slack import should_post, post_webhook
 
 from .agents.base import Agent
