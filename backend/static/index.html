@@ -1,120 +1,353 @@
-
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Opportunity Radar</title>
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Opportunity Radar — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
-    header, footer { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
-    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 16px; min-width: 160px; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
-    .list { border: 1px solid #e5e7eb; border-radius: 12px; padding: 0; max-height: 420px; overflow: auto; }
-    .row { display: flex; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
-    .row:last-child { border-bottom: 0; }
-    select { padding: 8px; border-radius: 8px; }
-    .layout { display: grid; grid-template-rows: auto 1fr auto; gap: 16px; height: 85vh; }
-    .muted { color: #6b7280; }
-    h3 { margin: 0 0 6px 0; font-size: 14px; color: #374151; }
-    .val { font-weight: 700; font-size: 18px; }
+    :root {
+      --bg: #0f1217;
+      --panel: #151a21;
+      --muted: #a7b0bf;
+      --ok: #2ecc71;
+      --warn: #f1c40f;
+      --err: #e74c3c;
+      --accent: #5b9cff;
+      --grid: 16px;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: #e6edf3; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 18px 18px 120px; }
+    header { display:flex; align-items:center; gap:12px; margin-bottom: 16px; }
+    h1 { font-size: 18px; margin: 0 12px 0 0; font-weight: 700; }
+    .controls { display:flex; flex-wrap: wrap; gap: 10px; align-items:center; }
+    select, button, .pill { background: var(--panel); border: 1px solid #2a2f39; color: #e6edf3; padding: 8px 10px; border-radius: 10px; font-size: 13px; }
+    button:hover { border-color: #3a4150; cursor: pointer; }
+    .pill { display:inline-flex; align-items:center; gap:8px; }
+    .pill .dot { width:8px; height:8px; border-radius:50%; }
+
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid); }
+    .card {
+      background: var(--panel);
+      border: 1px solid #222935;
+      border-radius: var(--radius);
+      padding: 14px;
+      min-height: 88px;
+    }
+    .card h3 { margin:0 0 6px; font-size: 12px; letter-spacing:.02em; color: var(--muted); font-weight:600; }
+    .value { font-size: 22px; font-weight: 700; }
+    .sub { color: var(--muted); font-size: 12px; }
+    .row { display:flex; gap:12px; align-items:center; justify-content: space-between; }
+    .kpis { grid-column: 1 / span 12; display:grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid); }
+
+    .kpis .card { min-height: 120px; }
+    .span-3 { grid-column: span 3; }
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+
+    .list { max-height: 280px; overflow: auto; border-radius: 10px; border: 1px solid #222935; }
+    .list table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .list th, .list td { padding: 8px 10px; border-bottom: 1px solid #202633; }
+    .list tr:hover td { background: #11161f; }
+
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight:600; border:1px solid transparent; }
+    .ok    { color: #9ae7bc; background: #103921; border-color:#1d5d37; }
+    .warn  { color: #ffe58a; background: #3b3109; border-color:#6a5b13; }
+    .err   { color: #ffb4b4; background: #3a0f0f; border-color:#6a1e1e; }
+    .muted { color: var(--muted); }
+
+    .footer { position: fixed; bottom: 0; left:0; right:0; background: #0d1015ea; border-top: 1px solid #1f2633; backdrop-filter: blur(4px); }
+    .footer .inner { max-width: 1400px; margin: 0 auto; padding: 10px 16px; display:flex; gap:16px; align-items:center; justify-content: space-between; font-size: 12px; color: var(--muted); }
+    .charts { display:grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid); }
+    canvas { width: 100% !important; height: 220px !important; }
   </style>
 </head>
 <body>
-  <div class="layout">
+  <div class="wrap">
     <header>
-      <div>
-        <label>Symbol</label>
+      <h1>Opportunity Radar</h1>
+      <div class="controls">
+        <label class="muted">Symbol</label>
         <select id="symbol"></select>
+        <label class="muted">Auto‑refresh</label>
+        <select id="interval">
+          <option value="3">3s</option>
+          <option value="5" selected>5s</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+        </select>
+        <button id="runNow">Run agents now</button>
+        <button id="exportCsv">Export CSV</button>
+        <span class="pill" id="debugSymbol"><span class="dot" style="background:var(--accent)"></span><span>symbol: —</span></span>
       </div>
-      <div class="card"><h3>Mom 1m</h3><div class="val" id="mom1">–</div></div>
-      <div class="card"><h3>Mom 5m</h3><div class="val" id="mom5">–</div></div>
-      <div class="card"><h3>px vs VWAP</h3><div class="val" id="pxvwap">–</div></div>
-      <div class="card"><h3>RVOL</h3><div class="val" id="rvol">–</div></div>
-      <div class="card"><h3>ATR 1m</h3><div class="val" id="atr1">–</div></div>
-      <div class="card"><h3>Trend Score</h3><div class="val" id="tscore">–</div></div>
     </header>
 
-    <main>
-      <div class="list" id="findings"></div>
-    </main>
+    <!-- KPI row -->
+    <section class="kpis">
+      <div class="card span-3" id="kpi-trend">
+        <h3>Trend Score (p_up)</h3>
+        <div class="value" id="trendScore">–</div>
+        <div class="sub" id="trendSub">p_1m=– · p_5m=– · p_15m=–</div>
+      </div>
+      <div class="card span-3">
+        <h3>Price vs VWAP (bps)</h3>
+        <div class="value" id="vwapBps">0</div>
+        <div class="sub">1m window</div>
+      </div>
+      <div class="card span-3">
+        <h3>Momentum</h3>
+        <div class="row">
+          <div><div class="sub">1m</div><div class="value" id="mom1">0</div></div>
+          <div><div class="sub">5m</div><div class="value" id="mom5">0</div></div>
+        </div>
+      </div>
+      <div class="card span-3">
+        <h3>RVOL (5 vs 20)</h3>
+        <div class="value" id="rvol">1.00x</div>
+        <div class="sub">bar‑based</div>
+      </div>
+    </section>
 
-    <footer>
-      <div class="muted" id="status">loading…</div>
-    </footer>
+    <!-- Charts -->
+    <section class="charts" style="margin-top:16px">
+      <div class="card span-6">
+        <h3>Momentum over time</h3>
+        <canvas id="chartMom"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>Trend score over time</h3>
+        <canvas id="chartTrend"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>VWAP deviation (bps)</h3>
+        <canvas id="chartVWAP"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>RVOL over time</h3>
+        <canvas id="chartRVOL"></canvas>
+      </div>
+    </section>
+
+    <!-- Latest findings -->
+    <section style="margin-top:16px" class="grid">
+      <div class="card span-8">
+        <h3>Latest Findings</h3>
+        <div class="list">
+          <table id="findings">
+            <thead><tr><th style="width:140px">ts</th><th style="width:140px">agent</th><th>label / details</th><th style="width:80px">score</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card span-4">
+        <h3>Health</h3>
+        <div id="health">
+          <div class="row"><span class="muted">API</span><span id="apiHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">DB</span><span id="dbHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">Agents</span><span id="agentsHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">LLM netcheck</span><span id="llmHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">Top of book</span><span id="tob" class="muted">–</span></div>
+          <div class="row"><span class="muted">Trades cached</span><span id="tradesCached" class="muted">0</span></div>
+        </div>
+      </div>
+    </section>
   </div>
 
-  <script>
-    const api = (p) => p.startsWith("http") ? p : (location.origin + p);
-    const els = {
-      symbol: document.getElementById("symbol"),
-      mom1: document.getElementById("mom1"),
-      mom5: document.getElementById("mom5"),
-      pxvwap: document.getElementById("pxvwap"),
-      rvol: document.getElementById("rvol"),
-      atr1: document.getElementById("atr1"),
-      tscore: document.getElementById("tscore"),
-      findings: document.getElementById("findings"),
-      status: document.getElementById("status"),
-    };
+  <div class="footer">
+    <div class="inner">
+      <div>Last update: <span id="lastUpdate" class="muted">–</span></div>
+      <div id="statusText">Ready.</div>
+    </div>
+  </div>
 
-    async function jget(path) {
-      const res = await fetch(path);
-      if (!res.ok) throw new Error(res.status + " " + res.statusText);
-      return res.json();
+<script>
+// ======== Config ========
+const BASE = location.origin; // same host as API
+let POLL_MS = 5000;
+let SYMBOLS = ["BTC-USD","ETH-USD","ADA-USD"];
+let CURRENT = localStorage.getItem('symbol') || SYMBOLS[0];
+
+// ======== DOM helpers ========
+const $ = (sel) => document.querySelector(sel);
+const fmt = (x, dp=1) => (Number.isFinite(x) ? x.toFixed(dp) : '0');
+const byId = (id) => document.getElementById(id);
+
+// ======== Charts ========
+const tsFmt = (d) => new Date(d).toLocaleTimeString();
+const mkLine = (ctx, label) => new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: [{ label, data: [], tension:.25, pointRadius:0 }] },
+  options: { responsive:true, animation:false, plugins:{ legend:{ display:false } },
+    scales:{ x:{ ticks:{ color:'#8b98b9' } }, y:{ ticks:{ color:'#8b98b9' }, grid:{ color:'#202633' } } }
+  }
+});
+const charts = {
+  mom:   mkLine(byId('chartMom').getContext('2d'), 'mom1_bps'),
+  trend: mkLine(byId('chartTrend').getContext('2d'), 'p_up'),
+  vwap:  mkLine(byId('chartVWAP').getContext('2d'), 'px_vs_vwap_bps_1m'),
+  rvol:  mkLine(byId('chartRVOL').getContext('2d'), 'rvol_1m')
+};
+const pushChart = (c, label, val, max=120) => {
+  const ds = c.data.datasets[0];
+  c.data.labels.push(label);
+  ds.data.push(val);
+  if (ds.data.length > max) { ds.data.shift(); c.data.labels.shift(); }
+  c.update();
+};
+
+// ======== Fetch helpers ========
+async function j(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return await r.json();
+}
+
+// ======== UI Wiring ========
+function populateSymbols(list) {
+  const sel = byId('symbol');
+  sel.innerHTML = '';
+  list.forEach(s => {
+    const opt = document.createElement('option'); opt.value = s; opt.textContent = s; sel.appendChild(opt);
+  });
+  sel.value = CURRENT;
+}
+
+async function refreshHealth() {
+  try {
+    const H = await j(`${BASE}/health`);
+    SYMBOLS = H.symbols?.length ? H.symbols : SYMBOLS; populateSymbols(SYMBOLS);
+    setBadge('apiHealth', true, 'ok');
+    const a = H.agents || {}; const names = Object.keys(a);
+    const stale = names.filter(k => !a[k]?.last_run);
+    setBadge('agentsHealth', stale.length === 0, stale.length ? `${stale.length} stale` : 'ok');
+  } catch (e) { setBadge('apiHealth', false, 'down'); }
+
+  try { const D = await j(`${BASE}/db-health`); setBadge('dbHealth', !!D.ok, D.ok? 'ok':'down'); } catch(e){ setBadge('dbHealth', false, 'down'); }
+
+  // LLM netcheck: look for recent llm_analyst last_run in /health
+  try {
+    const H = await j(`${BASE}/health`);
+    const llm = H.agents?.llm_analyst; const ok = !!llm?.last_run;
+    setBadge('llmHealth', ok, ok? 'ok':'unreachable');
+  } catch(e){ setBadge('llmHealth', false, 'unreachable'); }
+}
+
+function setBadge(id, ok, label) {
+  const el = byId(id); el.className = `badge ${ok? 'ok':'err'}`; el.textContent = label || (ok? 'ok':'err');
+}
+
+async function refreshTiles() {
+  const s = CURRENT;
+  const tf = await j(`${BASE}/signals_tf?symbol=${encodeURIComponent(s)}`);
+  byId('mom1').textContent = fmt(tf.mom_bps_1m);
+  byId('mom5').textContent = fmt(tf.mom_bps_5m);
+  byId('vwapBps').textContent = fmt(tf.px_vs_vwap_bps_1m);
+  byId('rvol').textContent = `${fmt(tf.rvol_1m,2)}x`;
+
+  // trend score: pull from findings if present else derive simple neutral
+  try {
+    const F = await j(`${BASE}/findings?symbol=${encodeURIComponent(s)}&limit=25`);
+    const t = (F.findings||[]).find(x => x.agent === 'trend_score');
+    if (t) {
+      const d = t.details || {}; const p = (d.p_up ?? 0.5);
+      byId('trendScore').textContent = fmt(p*10,1);
+      byId('trendSub').textContent = `p_1m=${fmt(d.p_1m??0.5,2)} · p_5m=${fmt(d.p_5m??0.5,2)} · p_15m=${fmt(d.p_15m??0.5,2)}`;
+      pushChart(charts.trend, new Date().toLocaleTimeString(), p);
     }
+  } catch {}
 
-    async function loadSymbols() {
-      const h = await jget("/health");
-      els.symbol.innerHTML = "";
-      for (const s of h.symbols) {
-        const opt = document.createElement("option");
-        opt.value = s; opt.textContent = s;
-        els.symbol.appendChild(opt);
-      }
-      els.symbol.value = h.symbols[0];
-    }
+  // /debug/state for TOB + trades count
+  try {
+    const S = await j(`${BASE}/debug/state?symbol=${encodeURIComponent(s)}`);
+    byId('tradesCached').textContent = S.trades_cached ?? 0;
+    const bid = (S.last_trade?.[3]) ?? null; // depends on state shape; fallback below
+    const bq = await j(`${BASE}/signals?symbol=${encodeURIComponent(s)}`);
+    byId('tob').textContent = (bq.best_bid!=null && bq.best_ask!=null) ? `${bq.best_bid} / ${bq.best_ask}` : '–';
+  } catch {}
 
-    function fmt(x, d=1) { return (x===null||x===undefined) ? "–" : Number(x).toFixed(d); }
+  // push charts for signals
+  const now = new Date().toLocaleTimeString();
+  pushChart(charts.mom,  now, Number(tf.mom_bps_1m) || 0);
+  pushChart(charts.vwap, now, Number(tf.px_vs_vwap_bps_1m) || 0);
+  pushChart(charts.rvol, now, Number(tf.rvol_1m) || 1);
+}
 
-    async function refresh() {
-      const sym = els.symbol.value;
-      els.status.textContent = "updating " + sym + "…";
-      try {
-        const [sig, tf] = await Promise.all([
-          jget(`/signals?symbol=${encodeURIComponent(sym)}`),
-          jget(`/signals_tf?symbol=${encodeURIComponent(sym)}`),
-        ]);
-        els.mom1.textContent = fmt(sig.mom1_bps, 1) + " bps";
-        els.mom5.textContent = fmt(sig.mom5_bps, 1) + " bps";
-        els.pxvwap.textContent = fmt(sig.px_vs_vwap_bps, 1) + " bps";
-        els.rvol.textContent = fmt(sig.rvol_vs_recent, 2) + "×";
-        els.atr1.textContent = fmt(tf.atr_1m, 3);
+async function refreshFindings() {
+  const s = CURRENT; const T = byId('findings').querySelector('tbody');
+  try {
+    const F = await j(`${BASE}/findings?symbol=${encodeURIComponent(s)}&limit=50`);
+    const rows = (F.findings||[]).map(f => {
+      const tr = document.createElement('tr');
+      const d = f.details||{}; const label = f.label||f.agent;
+      const details = (typeof d === 'object') ? JSON.stringify(d) : String(d);
+      tr.innerHTML = `<td>${new Date(f.ts_utc||Date.now()).toLocaleTimeString()}</td>
+                      <td><span class="badge ${label==='trend_score' ? 'ok':'muted'}">${f.agent}</span></td>
+                      <td><span class="muted">${label}</span> · ${details}</td>
+                      <td>${fmt(Number(f.score)||0,2)}</td>`;
+      return tr;
+    });
+    T.replaceChildren(...rows);
+  } catch (e) {
+    T.innerHTML = '';
+  }
+}
 
-        // trend score is produced by agent; show last finding if present
-        const f = await jget(`/findings?symbol=${encodeURIComponent(sym)}&limit=10`);
-        let tscore = null;
-        els.findings.innerHTML = "";
-        for (const row of f.findings) {
-          const div = document.createElement("div");
-          div.className = "row";
-          div.innerHTML = `<div>${row.agent}</div><div>${fmt(row.score,2)}</div>`;
-          els.findings.appendChild(div);
-          if (row.agent === "trend_score" && tscore === null) tscore = row.score;
-        }
-        els.tscore.textContent = tscore===null ? "–" : fmt(tscore,2);
+function setupControls() {
+  const sel = byId('symbol');
+  sel.addEventListener('change', () => {
+    CURRENT = sel.value; localStorage.setItem('symbol', CURRENT);
+    byId('debugSymbol').lastElementChild.textContent = `symbol: ${CURRENT}`;
+    // clear charts on symbol switch for clarity
+    Object.values(charts).forEach(c => { c.data.labels = []; c.data.datasets[0].data = []; c.update(); });
+  });
+  byId('interval').addEventListener('change', (e)=>{
+    const v = Number(e.target.value)||5; POLL_MS = v*1000; restartPolling();
+  });
+  byId('runNow').addEventListener('click', async ()=>{
+    const names = ['rvol_spike','trend_score'];
+    try { await j(`${BASE}/agents/run-now?names=${names.join(',')}&symbol=${encodeURIComponent(CURRENT)}&insert=true`);
+      byId('statusText').textContent = 'Agents ran.';
+    } catch(e) { byId('statusText').textContent = 'Run-now failed.'; }
+    await refreshFindings();
+  });
+  byId('exportCsv').addEventListener('click', exportCsv);
+  byId('debugSymbol').lastElementChild.textContent = `symbol: ${CURRENT}`;
+}
 
-        els.status.textContent = "ok · trades " + (sig.trades_cached || 0);
-      } catch (e) {
-        els.status.textContent = "error: " + e.message;
-      }
-    }
+async function exportCsv() {
+  const s = CURRENT; const F = await j(`${BASE}/findings?symbol=${encodeURIComponent(s)}&limit=500`);
+  const rows = [["ts_utc","agent","symbol","score","label","details"]]
+    .concat((F.findings||[]).map(f=>[
+      f.ts_utc||'', f.agent||'', f.symbol||s, String(f.score??''), f.label||'', JSON.stringify(f.details||{})
+    ]));
+  const csv = rows.map(r=> r.map(x=>`"${String(x).replaceAll('"','""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${s}-findings.csv`; a.click();
+}
 
-    (async () => {
-      await loadSymbols();
-      els.symbol.addEventListener("change", refresh);
-      await refresh();
-      setInterval(refresh, 5000);
-    })();
-  </script>
+let timer = null;
+function restartPolling(){ if (timer) clearInterval(timer); timer = setInterval(tick, POLL_MS); }
+async function tick(){
+  await Promise.allSettled([refreshHealth(), refreshTiles(), refreshFindings()]);
+  byId('lastUpdate').textContent = new Date().toLocaleTimeString();
+}
+
+(async function init(){
+  setupControls();
+  await refreshHealth();
+  await tick();
+  restartPolling();
+})();
+</script>
 </body>
 </html>
