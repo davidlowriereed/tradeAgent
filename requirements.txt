@@ -1,5 +1,7 @@
 # create a branch
-git checkout -b chore/requirements-compatible-pins
+git checkout chore/requirements-compatible-pins
+git add -A
+git commit --allow-empty -m "chore: prepare for dotenv + orjson"
 
 # write the new requirements.txt
 cat > requirements.txt <<'REQ'
@@ -25,7 +27,7 @@ asyncpg~=0.29
 python-dateutil~=2.9
 
 # OpenAI SDK
-openai>=1.40.0
+openai>=1.40,<2
 
 # Env config
 python-dotenv~=1.0
