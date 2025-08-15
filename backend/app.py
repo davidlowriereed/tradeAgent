@@ -18,10 +18,10 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import connect_async, pg_conn
+from .db import db_health, connect_async, pg_conn
 from .services.market import market_loop
 
-app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
+app = FastAPI(title="Opportunity Radar")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 @app.on_event("startup")
