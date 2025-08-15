@@ -1,0 +1,120 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Opportunity Radar</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
+    header, footer { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 16px; min-width: 160px; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+    .list { border: 1px solid #e5e7eb; border-radius: 12px; padding: 0; max-height: 420px; overflow: auto; }
+    .row { display: flex; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
+    .row:last-child { border-bottom: 0; }
+    select { padding: 8px; border-radius: 8px; }
+    .layout { display: grid; grid-template-rows: auto 1fr auto; gap: 16px; height: 85vh; }
+    .muted { color: #6b7280; }
+    h3 { margin: 0 0 6px 0; font-size: 14px; color: #374151; }
+    .val { font-weight: 700; font-size: 18px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <div>
+        <label>Symbol</label>
+        <select id="symbol"></select>
+      </div>
+      <div class="card"><h3>Mom 1m</h3><div class="val" id="mom1">–</div></div>
+      <div class="card"><h3>Mom 5m</h3><div class="val" id="mom5">–</div></div>
+      <div class="card"><h3>px vs VWAP</h3><div class="val" id="pxvwap">–</div></div>
+      <div class="card"><h3>RVOL</h3><div class="val" id="rvol">–</div></div>
+      <div class="card"><h3>ATR 1m</h3><div class="val" id="atr1">–</div></div>
+      <div class="card"><h3>Trend Score</h3><div class="val" id="tscore">–</div></div>
+    </header>
+
+    <main>
+      <div class="list" id="findings"></div>
+    </main>
+
+    <footer>
+      <div class="muted" id="status">loading…</div>
+    </footer>
+  </div>
+
+  <script>
+    const api = (p) => p.startsWith("http") ? p : (location.origin + p);
+    const els = {
+      symbol: document.getElementById("symbol"),
+      mom1: document.getElementById("mom1"),
+      mom5: document.getElementById("mom5"),
+      pxvwap: document.getElementById("pxvwap"),
+      rvol: document.getElementById("rvol"),
+      atr1: document.getElementById("atr1"),
+      tscore: document.getElementById("tscore"),
+      findings: document.getElementById("findings"),
+      status: document.getElementById("status"),
+    };
+
+    async function jget(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(res.status + " " + res.statusText);
+      return res.json();
+    }
+
+    async function loadSymbols() {
+      const h = await jget("/health");
+      els.symbol.innerHTML = "";
+      for (const s of h.symbols) {
+        const opt = document.createElement("option");
+        opt.value = s; opt.textContent = s;
+        els.symbol.appendChild(opt);
+      }
+      els.symbol.value = h.symbols[0];
+    }
+
+    function fmt(x, d=1) { return (x===null||x===undefined) ? "–" : Number(x).toFixed(d); }
+
+    async function refresh() {
+      const sym = els.symbol.value;
+      els.status.textContent = "updating " + sym + "…";
+      try {
+        const [sig, tf] = await Promise.all([
+          jget(`/signals?symbol=${encodeURIComponent(sym)}`),
+          jget(`/signals_tf?symbol=${encodeURIComponent(sym)}`),
+        ]);
+        els.mom1.textContent = fmt(sig.mom1_bps, 1) + " bps";
+        els.mom5.textContent = fmt(sig.mom5_bps, 1) + " bps";
+        els.pxvwap.textContent = fmt(sig.px_vs_vwap_bps, 1) + " bps";
+        els.rvol.textContent = fmt(sig.rvol_vs_recent, 2) + "×";
+        els.atr1.textContent = fmt(tf.atr_1m, 3);
+
+        // trend score is produced by agent; show last finding if present
+        const f = await jget(`/findings?symbol=${encodeURIComponent(sym)}&limit=10`);
+        let tscore = null;
+        els.findings.innerHTML = "";
+        for (const row of f.findings) {
+          const div = document.createElement("div");
+          div.className = "row";
+          div.innerHTML = `<div>${row.agent}</div><div>${fmt(row.score,2)}</div>`;
+          els.findings.appendChild(div);
+          if (row.agent === "trend_score" && tscore === null) tscore = row.score;
+        }
+        els.tscore.textContent = tscore===null ? "–" : fmt(tscore,2);
+
+        els.status.textContent = "ok · trades " + (sig.trades_cached || 0);
+      } catch (e) {
+        els.status.textContent = "error: " + e.message;
+      }
+    }
+
+    (async () => {
+      await loadSymbols();
+      els.symbol.addEventListener("change", refresh);
+      await refresh();
+      setInterval(refresh, 5000);
+    })();
+  </script>
+</body>
+</html>

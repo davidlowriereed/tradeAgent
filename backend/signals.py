@@ -1,7 +1,6 @@
-# backend/signals.py
+
 import math
 from typing import Dict, Any, List
-
 from .state import trades, get_best_quotes, get_last_price
 from .bars import build_bars, momentum_bps, px_vs_vwap_bps, rvol_ratio, atr as bars_atr
 
@@ -13,10 +12,6 @@ def _num(x, default=0.0) -> float:
         return default
 
 def compute_signals(symbol: str) -> Dict[str, Any]:
-    """
-    Lightweight, per-symbol signals for the header/footer tiles.
-    Always returns finite numbers (or None for quotes).
-    """
     b1 = build_bars(symbol, "1m", 60)
     b5 = build_bars(symbol, "5m", 240)
 
@@ -47,9 +42,6 @@ def compute_signals(symbol: str) -> Dict[str, Any]:
     }
 
 def compute_signals_tf(symbol: str, tfs: List[str] = ["1m", "5m", "15m"]) -> Dict[str, Any]:
-    """
-    Multi-timeframe features. Keys: mom_bps_{tf}, px_vs_vwap_bps_{tf}, rvol_{tf}, atr_{tf}
-    """
     out: Dict[str, Any] = {}
     for tf in tfs:
         bars = build_bars(symbol, tf=tf, lookback_min=120)

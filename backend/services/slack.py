@@ -1,24 +1,25 @@
 
-import time, httpx
-from collections import defaultdict
-from ..config import ALERT_WEBHOOK_URL, AGENT_ALERT_COOLDOWN_SEC
+from __future__ import annotations
+import asyncio, json, aiohttp
+from ..config import AGENT_ALERT_COOLDOWN_SEC
 
-_last_post: dict[tuple, float] = defaultdict(float)
+_last_post = {}
 
 def should_post(agent: str, symbol: str) -> bool:
+    import time
     now = time.time()
     key = (agent, symbol)
-    if now - _last_post[key] < AGENT_ALERT_COOLDOWN_SEC:
-        return False
-    _last_post[key] = now
-    return True
+    last = _last_post.get(key, 0.0)
+    if now - last >= AGENT_ALERT_COOLDOWN_SEC:
+        _last_post[key] = now
+        return True
+    return False
 
-async def post_webhook(payload: dict | str):
-    if not ALERT_WEBHOOK_URL:
+async def post_webhook(payload: dict, url: str | None = None) -> None:
+    if not url:
         return
-    p = {"text": payload} if isinstance(payload, str) else payload
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(ALERT_WEBHOOK_URL, json=p)
+        async with aiohttp.ClientSession() as sess:
+            await sess.post(url, data=json.dumps(payload))
     except Exception:
         pass
