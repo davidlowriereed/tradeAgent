@@ -1,24 +1,15 @@
-*** a/backend/app.py
---- b/backend/app.py
-@@
--from fastapi import FastAPI, Request, HTTPException
--from fastapi.responses import HTMLResponse, JSONResponse
-+from fastapi import FastAPI, Request, HTTPException
-+from fastapi.responses import HTMLResponse
-+try:
-+    from fastapi.responses import ORJSONResponse  # type: ignore
-+    default_resp = ORJSONResponse
-+except Exception:
-+    from fastapi.responses import JSONResponse
-+    default_resp = JSONResponse
-@@
--app = FastAPI(title="Opportunity Radar")
-+app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
-
-
+# backend/app.py
 from __future__ import annotations
+
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
+try:
+    from fastapi.responses import ORJSONResponse  # type: ignore
+    default_resp = ORJSONResponse
+except Exception:
+    from fastapi.responses import JSONResponse
+    default_resp = JSONResponse
+
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, List, Optional
 import asyncio, time, json, os
@@ -29,7 +20,7 @@ from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
 from .db import connect_async, pg_conn
 
-app = FastAPI(title="Opportunity Radar")
+app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 @app.on_event("startup")
