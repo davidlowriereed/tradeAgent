@@ -22,37 +22,47 @@ class LLMAnalystAgent(Agent):
         tf = await compute_signals_tf(symbol)
         s  = await compute_signals(symbol)
 
-        # simple heuristic baseline
         score = (
             abs(tf.get("mom_bps_1m", 0))
             + abs(tf.get("px_vs_vwap_bps_1m", 0)) / 5
-            + max(0.0, (tf.get("rvol_1m", 1) - 1)) * 50
+            + max(0.0, (tf.get("rvol_1m", 1.0) - 1.0)) * 50
         ) / 10.0
-        score = max(0.0, min(float(score), 10.0))
+        score = float(max(0.0, min(score, 10.0)))
 
         posture, conf, rationale = "no_position", 0.5, "Neutral"
+
         try:
             from openai import OpenAI
             client = OpenAI()
+
+            prompt = (
+                f"Given features for {symbol}:\n"
+                f"mom_1m={tf.get('mom_bps_1m',0)} bps, "
+                f"mom_5m={tf.get('mom_bps_5m',0)} bps, "
+                f"mom_15m={tf.get('mom_bps_15m',0)} bps,\n"
+                f"vwap_1m={tf.get('px_vs_vwap_bps_1m',0)} bps, "
+                f"rvol_1m={tf.get('rvol_1m',1.0)},\n"
+                f"trend_p_up={s.get('trend_p_up', 0.5)}.\n"
+                # JSON braces live in a *plain* string (no f-string), so no doubling needed:
+                "Recommend one of: LONG, SHORT, or FLAT. "
+                "Return JSON {\"posture\":\"...\",\"confidence\":0-1,\"rationale\":\"...\"}.\n"
+            )
+
             msg = [
-                {"role": "system", "content": "You are a disciplined crypto trade analyst."},
-                {"role": "user", "content": f"""Given features for {symbol}:
-mom_1m={tf.get('mom_bps_1m',0)} bps, mom_5m={tf.get('mom_bps_5m',0)} bps,
-vwap_1m={tf.get('px_vs_vwap_bps_1m',0)} bps, rvol_1m={tf.get('rvol_1m',1)},
-trend_p_up={s.get('trend_p_up', 0.5)}.
-Recommend one of: LONG, SHORT, or FLAT. Return JSON {{"posture": "...", "confidence": 0-1, "rationale": "..."}}.
-"""},
+                {"role": "system", "content": "You are a disciplined crypto trade analyst. Be concise."},
+                {"role": "user", "content": prompt},
             ]
+
             rsp = client.chat.completions.create(
                 model=MODEL, messages=msg, temperature=0.2, max_tokens=180
             )
             txt = rsp.choices[0].message.content or "{}"
             m = re.search(r"\{.*\}", txt, re.S)
             obj = json.loads(m.group(0) if m else "{}")
-            posture_map = {"LONG":"long", "SHORT":"short", "FLAT":"no_position"}
-            posture = posture_map.get(str(obj.get("posture","")).upper(), "no_position")
+            posture_map = {"LONG": "long", "SHORT": "short", "FLAT": "no_position"}
+            posture = posture_map.get(str(obj.get("posture", "")).upper(), "no_position")
             conf = float(obj.get("confidence", 0.5) or 0.5)
-            rationale = (obj.get("rationale","") or "N/A")[:RATIONALE_CHARS]
+            rationale = (obj.get("rationale", "") or "N/A")[:RATIONALE_CHARS]
         except Exception:
             pass
 
@@ -60,13 +70,13 @@ Recommend one of: LONG, SHORT, or FLAT. Return JSON {{"posture": "...", "confide
             return None
 
         return {
-            "score": round(max(score, conf*10), 2),
+            "score": round(max(score, conf * 10), 2),
             "label": "llm_signal",
             "details": {
                 "posture": posture, "confidence": conf,
                 "trend_p_up": s.get("trend_p_up", 0.5),
                 "mom_1m": tf.get("mom_bps_1m", 0),
-                "rvol_1m": tf.get("rvol_1m", 1),
+                "rvol_1m": tf.get("rvol_1m", 1.0),
                 "rationale": rationale,
             },
         }
