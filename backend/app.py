@@ -1,3 +1,20 @@
+*** a/backend/app.py
+--- b/backend/app.py
+@@
+-from fastapi import FastAPI, Request, HTTPException
+-from fastapi.responses import HTMLResponse, JSONResponse
++from fastapi import FastAPI, Request, HTTPException
++from fastapi.responses import HTMLResponse
++try:
++    from fastapi.responses import ORJSONResponse  # type: ignore
++    default_resp = ORJSONResponse
++except Exception:
++    from fastapi.responses import JSONResponse
++    default_resp = JSONResponse
+@@
+-app = FastAPI(title="Opportunity Radar")
++app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
+
 
 from __future__ import annotations
 from fastapi import FastAPI, Request, HTTPException
