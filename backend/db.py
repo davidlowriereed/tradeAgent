@@ -1,10 +1,24 @@
-
-import asyncio
+# backend/db.py
+import asyncio, ssl, urllib.parse
 from typing import Optional, Any, Dict
 from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
 
 pg_conn: Optional[Any] = None
+
+def _ssl_kw_from_dsn(dsn: str) -> dict:
+    """Map ?sslmode=require to asyncpg's ssl kw."""
+    if not dsn:
+        return {}
+    qs = urllib.parse.parse_qs(urllib.parse.urlsplit(dsn).query)
+    mode = (qs.get("sslmode", [""])[0] or "").lower()
+    if mode == "require":
+        # minimal verification (works with DO managed PG)
+        return {"ssl": "require"}
+    # Uncomment for full verification:
+    # ctx = ssl.create_default_context()
+    # return {"ssl": ctx}
+    return {}
 
 async def connect_async():
     global pg_conn
@@ -13,40 +27,37 @@ async def connect_async():
     try:
         import asyncpg
         if DATABASE_URL:
-            pg_conn = await asyncpg.connect(DATABASE_URL)
-            return pg_conn
+            ssl_kw = _ssl_kw_from_dsn(DATABASE_URL)
+            pg_conn = await asyncpg.connect(DATABASE_URL, **ssl_kw)
+        return pg_conn
     except Exception:
-        pg_conn = None
-    return None
+        return None
 
-def heartbeat(agent: str, status: str) -> None:
-    # Optional: write to DB table; no-op if no DB
-    pass
-
-def insert_finding(agent: str, symbol: str, score: float, label: str, details: Dict) -> None:
-    if pg_conn is None:
-        RECENT_FINDINGS.append({
-            "agent": agent, "symbol": symbol, "score": score, "label": label, "details": details
-        })
-        return
+async def db_health() -> Dict[str, Any]:
     try:
-        # This table/SQL is illustrative; adjust to your schema.
-        import json, asyncio
-        async def _ins():
-            await pg_conn.execute(
-                "INSERT INTO findings(ts_utc, agent, symbol, score, label, details) VALUES (NOW(), $1,$2,$3,$4,$5)",
-                agent, symbol, score, label, json.dumps(details)
-            )
-        asyncio.get_event_loop().create_task(_ins())
+        conn = await connect_async()
+        if not conn:
+            return {"ok": False}
+        # lightweight ping
+        await conn.execute("SELECT 1;")
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+async def insert_finding(row: Dict[str, Any]) -> None:
+    """Best-effort insert with in-mem fallback."""
+    try:
+        conn = await connect_async()
+        if not conn:
+            raise RuntimeError("no_db")
+        await conn.execute(
+            """
+            INSERT INTO findings(ts_utc, agent, symbol, score, label, details)
+            VALUES(timezone('utc', now()), $1, $2, $3, $4, $5::jsonb)
+            """,
+            row.get("agent"), row.get("symbol"), float(row.get("score") or 0.0),
+            row.get("label"), row.get("details") or {}
+        )
     except Exception:
-        RECENT_FINDINGS.append({
-            "agent": agent, "symbol": symbol, "score": score, "label": label, "details": details
-        })
-
-def pg_fetchone(sql: str, params: tuple) -> Optional[dict]:
-    # Stub: return None to indicate no DB row
-    return None
-
-def pg_exec(sql: str, params: tuple) -> None:
-    # Stub: no-op
-    pass
+        # in-mem circular buffer already defined in state.py
+        RECENT_FINDINGS.appendleft(row)
