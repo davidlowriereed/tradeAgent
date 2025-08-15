@@ -22,6 +22,7 @@ from pathlib import Path
 
 # --- Third-party imports ---
 import httpx
+from typing import Optional
 from fastapi import FastAPI, APIRouter, Request, Query, Body
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -116,18 +117,23 @@ async def root():
 @app.get("/trend_now")
 async def trend_now(symbol: str = Query(...)):
     from .bars import build_bars, px_vs_vwap_bps, momentum_bps
+    import math
+    def sigmoid(x): 
+        try: return 1/(1+math.exp(-x))
+        except OverflowError: return 0.0 if x < 0 else 1.0
+
     b1  = build_bars(symbol, "1m", 60)
     b5  = build_bars(symbol, "5m", 240)
     if not b1:
         return {"symbol": symbol, "p_up": 0.0, "p_1m": 0.0, "p_5m": 0.0, "p_15m": 0.0, "live": True}
 
-    mom1 = (momentum_bps(b1, 1) or 0.0) / 10
-    mom5 = (momentum_bps(b5, 1) or 0.0) / 10
-    pxv1 = (px_vs_vwap_bps(b1, 20) or 0.0) / 10
+    mom1 = (momentum_bps(b1, 1) or 0.0)/10
+    mom5 = (momentum_bps(b5, 1) or 0.0)/10
+    pxv1 = (px_vs_vwap_bps(b1, 20) or 0.0)/10
 
-    p1  = _sigmoid(0.08*mom1 + 0.03*pxv1)
-    p5  = _sigmoid(0.06*mom5 + 0.03*pxv1)
-    p15 = _sigmoid(0.04*mom5 + 0.02*pxv1)
+    p1  = sigmoid(0.08*mom1 + 0.03*pxv1)
+    p5  = sigmoid(0.06*mom5 + 0.03*pxv1)
+    p15 = sigmoid(0.04*mom5 + 0.02*pxv1)
     p_up = max(0.0, min(1.0, 0.5*p1 + 0.35*p5 + 0.15*p15))
     return {"symbol": symbol, "p_up": round(p_up,4), "p_1m": round(p1,4), "p_5m": round(p5,4), "p_15m": round(p15,4), "live": True}
 
@@ -319,8 +325,31 @@ async def llm_health():
 # ---------------------------------------------------------
 
 @app.get("/findings")
-async def findings(symbol: str | None = None, limit: int = 50):
-    return {"findings": fetch_findings(symbol, limit)}
+async def findings(
+    symbol: Optional[str] = Query(None),
+    agent: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500)
+):
+    """
+    Returns most recent findings, filtered by symbol and/or agent if provided.
+    """
+    try:
+        from .db import recent_findings  # your DB accessor
+        rows = recent_findings(symbol=symbol, agent=agent, limit=limit)
+        return {"findings": rows}
+    except Exception:
+        # if DB is down, fall back to in-memory buffer if you keep one
+        from .state import RECENT_FINDINGS  # optional ring buffer [(ts, agent, sym, ...)]
+        out = []
+        for row in reversed(list(RECENT_FINDINGS)):
+            if symbol and row["symbol"] != symbol:
+                continue
+            if agent and row["agent"] != agent:
+                continue
+            out.append(row)
+            if len(out) >= limit:
+                break
+        return {"findings": out}
 
 
 @app.get("/agents")
@@ -410,6 +439,18 @@ async def set_position(payload: dict = Body(...)):
 # ---------------------------------------------------------
 
 @app.post("/agents/run-now")
+
+insert = request.query_params.get("insert", "false").lower() == "true"
+...
+res = await agent.run(symbol)
+if insert and res:
+    try:
+        from .db import insert_finding
+        insert_finding(res)
+        # (optional) also push into in-memory RECENT_FINDINGS ring buffer
+    except Exception:
+        pass
+
 async def run_now(
     names: str | None = None,
     agent: str | None = None,
