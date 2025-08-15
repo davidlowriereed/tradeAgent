@@ -117,14 +117,62 @@
 </footer>
 
 <script>
-const $ = sel => document.querySelector(sel);
-const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "—" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
-const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t.getTime())/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
-const esc = s => String(s ?? '').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  (() => {
+// ---- DOM helpers ----
+  const $  = sel => document.querySelector(sel);
+  const $$ = sel => Array.from(document.querySelectorAll(sel));
+  //const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "—" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
+  const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t.getTime())/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
+  const esc = s => String(s ?? '').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
-let SYMBOLS=[], current=null, timers=[];
-function clearTimers(){ timers.forEach(clearInterval); timers=[]; }
+  let SYMBOLS=[], current=null, timers=[];
+  function clearTimers(){ timers.forEach(clearInterval); timers=[]; }
 
+  // Elements (adjust IDs to yours)
+  const selSymbol   = $('#symbol-select');   // <select id="symbol-select">BTC-USD...</select>
+  const cardTrend   = $('#trend-pup');       // main value
+  const cardP1m     = $('#trend-p1m');
+  const cardP5m     = $('#trend-p5m');
+  const cardP15m    = $('#trend-p15m');
+
+  const cardPxv1m   = $('#pxv-1m');          // “Price vs VWAP (bps)”
+  const cardMom1m   = $('#mom-1m');
+  const cardMom5m   = $('#mom-5m');
+  const cardRvol    = $('#rvol-5v20');       // RVOL tile
+
+  const bestBidEl   = $('#best-bid');
+  const bestAskEl   = $('#best-ask');
+  const tradesEl    = $('#trades-cached');
+
+  const findingsList = $('#findings-list');  // <ul id="findings-list">
+
+   // ---- symbol state ----
+  function getSymbol() {
+    const s = selSymbol?.value?.trim();
+    return s || 'BTC-USD';
+  }
+
+  function setSymbol(sym) {
+    if (selSymbol) selSymbol.value = sym;
+    // persist in query string so refresh preserves selection
+    const url = new URL(window.location.href);
+    url.searchParams.set('symbol', sym);
+    history.replaceState(null, '', url.toString());
+    // immediately refresh everything for the new symbol
+    refreshAll(true);
+  }
+
+  if (selSymbol) {
+    selSymbol.addEventListener('change', () => setSymbol(getSymbol()));
+  }
+
+  // initialize from ?symbol=...
+  (function initSymbolFromURL(){
+    const url = new URL(window.location.href);
+    const s = url.searchParams.get('symbol');
+    if (s) setSymbol(s);
+  })();
+  
 async function init(){
   const h = await (await fetch('/health')).json();
   SYMBOLS = h.symbols || [];
@@ -214,6 +262,126 @@ async function fetchTop(){
   }catch(e){ console.error(e); }
 }
 
+// ---- fetch helpers ----
+  async function jget(path, params={}) {
+    const u = new URL(path, window.location.origin);
+    for (const [k,v] of Object.entries(params)) u.searchParams.set(k, v);
+    const r = await fetch(u.toString(), {cache:'no-cache'});
+    // If server ever returns HTML error, avoid JSON parse blowups
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const text = await r.text();
+      throw new Error(`Non-JSON response ${r.status}: ${text.slice(0,120)}`);
+    }
+    return r.json();
+  }
+
+ const fmtBps = n => (Number.isFinite(n) ? Math.round(n) : 0);
+ const fmtNum = n => (Number.isFinite(n) ? n : 0);
+ const pct    = x => (Number.isFinite(x) ? Math.round(x*100) : 0);
+    
+ // ---- updaters ----
+  async function updateSignals() {
+    const symbol = getSymbol();
+    const data = await jget('/signals', {symbol});
+    // header/footer basics
+    if (bestBidEl)  bestBidEl.textContent = data.best_bid ?? '—';
+    if (bestAskEl)  bestAskEl.textContent = data.best_ask ?? '—';
+    if (tradesEl)   tradesEl.textContent  = data.trades_cached ?? 0;
+    // if you also show “Price vs VWAP (bps)” from /signals (or take from /signals_tf below)
+    if (cardPxv1m)  cardPxv1m.textContent = fmtBps(data.px_vs_vwap_bps);
+    // momentum 1m on this endpoint is often sparse—prefer /signals_tf for the tiles
+  }
+
+  async function updateSignalsTF() {
+    const symbol = getSymbol();
+    const tf = await jget('/signals_tf', {symbol});
+    if (cardMom1m) cardMom1m.textContent = fmtBps(tf.mom_bps_1m);
+    if (cardMom5m) cardMom5m.textContent = fmtBps(tf.mom_bps_5m);
+    // If you prefer px_vs_vwap from /signals_tf too:
+    if (cardPxv1m && Number.isFinite(tf.px_vs_vwap_bps_1m)) {
+      cardPxv1m.textContent = fmtBps(tf.px_vs_vwap_bps_1m);
+    }
+    if (cardRvol) {
+      const r = tf.rvol_1m ?? 0;
+      cardRvol.textContent = Number.isFinite(r) ? r.toFixed(2) : '0.00';
+    }
+  }
+
+  async function updateTrend() {
+    const symbol = getSymbol();
+
+    // First try DB-backed finding
+    try {
+      const f = await jget('/findings', {symbol, agent:'trend_score', limit:1});
+      if (f.findings && f.findings.length) {
+        const row = f.findings[0];
+        const d = row.details || {};
+        if (cardTrend) cardTrend.textContent = pct(d.p_up ?? row.score);
+        if (cardP1m)   cardP1m.textContent  = `p_1m=${pct(d.p_1m ?? 0)}`;
+        if (cardP5m)   cardP5m.textContent  = `p_5m=${pct(d.p_5m ?? 0)}`;
+        if (cardP15m)  cardP15m.textContent = `p_15m=${pct(d.p_15m ?? 0)}`;
+        return; // success via DB
+      }
+    } catch (e) {
+      // fall through to live
+    }
+
+    // Live fallback
+    try {
+      const live = await jget('/trend_now', {symbol});
+      if (cardTrend) cardTrend.textContent = pct(live.p_up);
+      if (cardP1m)   cardP1m.textContent  = `p_1m=${pct(live.p_1m)}`;
+      if (cardP5m)   cardP5m.textContent  = `p_5m=${pct(live.p_5m)}`;
+      if (cardP15m)  cardP15m.textContent = `p_15m=${pct(live.p_15m)}`;
+    } catch (e) {
+      if (cardTrend) cardTrend.textContent = '—';
+    }
+  }
+
+  async function updateFindings(replace=false) {
+    const symbol = getSymbol();
+    const data = await jget('/findings', {symbol, limit: 30});
+    // Simple re-render (or do incremental append if you track the last ts)
+    if (findingsList) {
+      findingsList.innerHTML = '';
+      (data.findings || []).forEach(row => {
+        const li = document.createElement('li');
+        const {agent, score, ts_utc, label, details} = row;
+        const rvol = details?.rvol ?? details?.rvol_1m ?? '';
+        const mom1 = details?.mom1_bps ?? details?.mom_bps_1m ?? '';
+        const pxvw = details?.px_vs_vwap_bps ?? details?.px_vs_vwap_bps_1m ?? '';
+        li.textContent = `${label} • ${new Date(ts_utc).toLocaleTimeString()} — RVOL=${rvol} · mom1=${mom1} · px-vwap=${pxvw}`;
+        findingsList.appendChild(li);
+      });
+    }
+  }
+
+  // ---- master refresh ----
+  let timer = null;
+  async function refreshAll(immediate=false) {
+    // Cancel any pending timer during symbol switch
+    if (timer) { clearTimeout(timer); timer = null; }
+
+    try {
+      await Promise.all([
+        updateSignals(),
+        updateSignalsTF(),
+        updateTrend(),
+        updateFindings(true),
+      ]);
+    } catch (e) {
+      console.warn('refresh error', e);
+    } finally {
+      timer = setTimeout(refreshAll, 5000);
+    }
+  }
+
+  // Boot
+  refreshAll(true);
+})();
+
+    
 function actionPill(act){
   const m = {observe:'', prepare:'', 'consider-entry':'ok', 'consider-exit':'warn'};
   const cls = m[act]||'';
