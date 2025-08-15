@@ -3,8 +3,10 @@ import asyncio, ssl, urllib.parse
 from typing import Optional, Any, Dict
 from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
+from datetime import datetime, timezone
 
 pg_conn: Optional[Any] = None
+HEARTBEATS: dict[str, dict] = {}
 
 def _ssl_kw_from_dsn(dsn: str) -> dict:
     """Map ?sslmode=require to asyncpg's ssl kw."""
@@ -19,6 +21,17 @@ def _ssl_kw_from_dsn(dsn: str) -> dict:
     # ctx = ssl.create_default_context()
     # return {"ssl": ctx}
     return {}
+
+async def heartbeat(name: str, status: str = "ok") -> None:
+    """
+    Lightweight shim used by scheduler to record agent status.
+    Scheduler remains source of truth for /health; this prevents import crashes.
+    """
+    HEARTBEATS[name] = {
+        "status": status,
+        "last_run": datetime.now(timezone.utc).isoformat()
+    }
+# ------------------------------------
 
 async def connect_async():
     global pg_conn
