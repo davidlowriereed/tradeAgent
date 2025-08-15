@@ -3,75 +3,46 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Deque, Dict, Tuple, Optional, Any
 from .db import pg_exec, pg_fetchone
-import time
-RECENT_FINDINGS = deque(maxlen=1000)
 
-# ------------------------------
-# Realtime market state (feeds)
-# ------------------------------
+# ---------------------------------------------------------------------
+# In-memory scratchpads used across the app (no FastAPI routes here)
+# ---------------------------------------------------------------------
 
-# existing: trades, POSTURE_STATE, etc.
-# ensure trades exists
+# Recent Findings ring buffer (fallback when DB is unavailable)
+RECENT_FINDINGS: deque = deque(maxlen=1000)
 
-@app.get("/health")
-async def health():
-    from .config import SYMBOLS
-    from .state import trades
-    try:
-        agents_map = list_agents_last_run()
-    except Exception:
-        agents_map = {}
-    return {
-        "status": "ok",
-        "symbols": SYMBOLS,
-        "trades_cached": {sym: len(list(trades.get(sym, []))) for sym in SYMBOLS},
-        "agents": agents_map,
-    }
+# Trades: (ts_sec: float, price: float, size: float, side: "buy"|"sell")
+Trade = Tuple[float, float, float, str]
+trades: Dict[str, Deque[Trade]] = defaultdict(lambda: deque(maxlen=50_000))
 
-
-try:
-    trades
-except NameError:
-    trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=50_000))
-
-# Each trade tuple: (ts_epoch: float, price: float, size: float, side: "buy"|"sell")
-trades: Dict[str, Deque[tuple]] = defaultdict(lambda: deque(maxlen=10_000))
-
-# Running CVD and top-of-book
-cvd: Dict[str, float] = defaultdict(float)
-best_bid: Dict[str, Optional[float]] = defaultdict(lambda: None)
-best_ask: Dict[str, Optional[float]] = defaultdict(lambda: None)
-# Recent trades per symbol: (ts, price, size, side, bid, ask)
-trades = defaultdict(lambda: deque(maxlen=50_000))
-
-# Latest quoted bests
-_best_px = defaultdict(lambda: {"bid": None, "ask": None})
-
-# NEW: best quotes + last price caches
+# Quotes & last price cache
 _best_quotes: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
 _last_price: Dict[str, float] = {}
 
-def get_best_quotes(symbol: str) -> Optional[Tuple[Optional[float], Optional[float]]]:
-    return _best_quotes.get(symbol)
-
-def get_last_price(symbol: str) -> Optional[float]:
-    return _last_price.get(symbol)
-
-def record_trade(symbol: str, ts, price, size, side, bid=None, ask=None):
-    """
-    Append a trade and optionally update best bid/ask.
-    ts may arrive in ms; normalize to seconds.
-    """
+def record_trade(
+    symbol: str,
+    ts,
+    price,
+    size,
+    side,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+) -> None:
+    """Append a trade and optionally update best bid/ask. Normalizes ts to seconds."""
     try:
-        ts = float(ts); price = float(price); size = float(size)
+        ts_f = float(ts)
+        px_f = float(price)
+        sz_f = float(size)
     except Exception:
         return
-    if ts > 1e12:  # ms -> s
-        ts /= 1000.0
+
+    if ts_f > 1e12:  # ms -> s
+        ts_f /= 1000.0
 
     dq = trades.setdefault(symbol, deque(maxlen=50_000))
-    dq.append((ts, price, size, side))
-    _last_price[symbol] = price
+    dq.append((ts_f, px_f, sz_f, str(side)))
+
+    _last_price[symbol] = px_f
 
     if bid is not None or ask is not None:
         b, a = _best_quotes.get(symbol, (None, None))
@@ -83,18 +54,20 @@ def record_trade(symbol: str, ts, price, size, side, bid=None, ask=None):
             except: pass
         _best_quotes[symbol] = (b, a)
 
-def get_best_quote(symbol: str) -> tuple[float|None, float|None]:
-    return _best_quotes.get(symbol, (None, None))
-def best_px(symbol: str) -> tuple[float | None, float | None]:
-    b = _best_px[symbol]
-    return b["bid"], b["ask"]
+def get_best_quotes(symbol: str) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    return _best_quotes.get(symbol)
+
+def get_last_price(symbol: str) -> Optional[float]:
+    return _last_price.get(symbol)
 
 def best_px(symbol: str) -> Tuple[Optional[float], Optional[float]]:
-    return best_bid.get(symbol), best_ask.get(symbol)
+    """Back-compat alias used in a few places."""
+    return _best_quotes.get(symbol, (None, None))
 
-# ---------------------------------------------------------
-# Position / posture state  (DB + in-memory cache)
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------
+# Position / posture state (DB-backed + in-memory cache)
+# ---------------------------------------------------------------------
+
 _POSTURE_CACHE: Dict[str, Dict[str, Any]] = defaultdict(
     lambda: {
         "status": "flat",
@@ -154,7 +127,10 @@ def set_position(
     return get_position(symbol)
 
 __all__ = [
-    "trades", "cvd", "best_bid", "best_ask", "best_px",
-    "get_position", "set_position",
-    "POSTURE_STATE",
+    # caches
+    "RECENT_FINDINGS", "trades",
+    # quotes/price helpers
+    "record_trade", "get_best_quotes", "get_last_price", "best_px",
+    # posture
+    "get_position", "set_position", "POSTURE_STATE",
 ]
