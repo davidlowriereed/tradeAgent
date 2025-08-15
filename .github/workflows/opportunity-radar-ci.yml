@@ -16,6 +16,21 @@ jobs:
           sudo apt-get update && sudo apt-get install -y jq curl
       - name: Import preflight (catch bad imports)
         run: python - <<'PY'
+      - name: Import preflight (catch bad imports)
+  run: python - <<'PY'
+try:
+    import backend.main  # import-time failures (e.g., bad deps) fail here
+    print("OK: backend.main import")
+except Exception as e:
+    print("FAILED:", type(e).__name__, e); raise
+PY
+
+- name: Smoke endpoints
+  run: |
+    uvicorn backend.main:app --port 8080 & sleep 2
+    curl -fsS http://localhost:8080/health | jq .
+    curl -fsS "http://localhost:8080/signals?symbol=BTC-USD" | jq .
+
 import importlib; import sys
 try:
     import backend.main as m   # imports everything FastAPI loads
@@ -29,3 +44,5 @@ PY
         run: |
           curl -fsS http://localhost:8080/health | jq .
           curl -fsS "http://localhost:8080/signals?symbol=BTC-USD" | jq .
+
+
