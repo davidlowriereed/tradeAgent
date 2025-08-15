@@ -117,352 +117,221 @@
 </footer>
 
 <script>
-  (() => {
-// ---- DOM helpers ----
-  const $  = sel => document.querySelector(sel);
-  const $$ = sel => Array.from(document.querySelectorAll(sel));
-  //const fmtNum = (x, d=2) => (x===null||x===undefined||isNaN(+x)) ? "—" : (+x).toLocaleString(undefined,{maximumFractionDigits:d});
-  const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t.getTime())/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
+(() => {
+  // ---------- small helpers ----------
+  const $  = s => document.querySelector(s);
   const esc = s => String(s ?? '').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const fmt = (x, d=2) => (Number.isFinite(+x) ? (+x).toFixed(d) : '—');
+  const bps = x => (Number.isFinite(+x) ? String(Math.round(+x)) : '—');
+  const pct = x => (Number.isFinite(+x) ? String(Math.round(+x*100)) : '—');
+  const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t)/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
 
-  let SYMBOLS=[], current=null, timers=[];
-  function clearTimers(){ timers.forEach(clearInterval); timers=[]; }
+  // ---------- element refs (match your markup) ----------
+  const elSymbol = $('#symbol');
+  const elRefresh = $('#refresh');
+  const elCSV = $('#csv');
+  const elStatus = $('#status');
 
-  // Elements (adjust IDs to yours)
-  const selSymbol   = $('#symbol-select');   // <select id="symbol-select">BTC-USD...</select>
-  const cardTrend   = $('#trend-pup');       // main value
-  const cardP1m     = $('#trend-p1m');
-  const cardP5m     = $('#trend-p5m');
-  const cardP15m    = $('#trend-p15m');
+  const elPUp = $('#p_up');
+  const elPBreak = $('#p_breakdown');
 
-  const cardPxv1m   = $('#pxv-1m');          // “Price vs VWAP (bps)”
-  const cardMom1m   = $('#mom-1m');
-  const cardMom5m   = $('#mom-5m');
-  const cardRvol    = $('#rvol-5v20');       // RVOL tile
+  const elPxV = $('#pxv');
+  const elMom1 = $('#mom1');
+  const elMom5 = $('#mom5');
+  const elRvol = $('#rvol');
 
-  const bestBidEl   = $('#best-bid');
-  const bestAskEl   = $('#best-ask');
-  const tradesEl    = $('#trades-cached');
+  const elBid = $('#bb');
+  const elAsk = $('#ba');
+  const elCached = $('#cached');
 
-  const findingsList = $('#findings-list');  // <ul id="findings-list">
+  const elFindings = $('#findings');
+  const elHealth = $('#health');
+  const elLiq = $('#liq');
+  const elNet = $('#net');
 
-   // ---- symbol state ----
-  function getSymbol() {
-    const s = selSymbol?.value?.trim();
-    return s || 'BTC-USD';
-  }
+  let timers = [];
+  const clearTimers = () => { timers.forEach(clearInterval); timers = []; };
 
-  function setSymbol(sym) {
-    if (selSymbol) selSymbol.value = sym;
-    // persist in query string so refresh preserves selection
-    const url = new URL(window.location.href);
-    url.searchParams.set('symbol', sym);
-    history.replaceState(null, '', url.toString());
-    // immediately refresh everything for the new symbol
-    refreshAll(true);
-  }
-
-  if (selSymbol) {
-    selSymbol.addEventListener('change', () => setSymbol(getSymbol()));
-  }
-
-  // initialize from ?symbol=...
-  (function initSymbolFromURL(){
-    const url = new URL(window.location.href);
-    const s = url.searchParams.get('symbol');
-    if (s) setSymbol(s);
-  })();
-  
-async function init(){
-  const h = await (await fetch('/health')).json();
-  SYMBOLS = h.symbols || [];
-  const sel = $('#symbol'); sel.innerHTML = SYMBOLS.map(s=>`<option>${s}</option>`).join('');
-  current = SYMBOLS[0] || null;
-  sel.value = current;
-  $('#csv').href = `/export-csv?symbol=${encodeURIComponent(current)}&limit=500`;
-  $('#refresh').addEventListener('change', resetLoops);
-  $('#symbol').addEventListener('change', e=>{ current=e.target.value; $('#csv').href=`/export-csv?symbol=${encodeURIComponent(current)}&limit=500`; resetLoops(); });
-  $('#run').addEventListener('click', runAgentsNow);
-  resetLoops();
-}
-
-function resetLoops(){
-  clearTimers();
-  const iv = (+$('#refresh').value||5)*1000;
-  fetchTop(); fetchFindings(); fetchHealth(); netcheck(); fetchLiquidity();
-  timers.push(setInterval(fetchTop, iv));
-  timers.push(setInterval(fetchFindings, iv));
-  timers.push(setInterval(fetchHealth, 15000));
-  timers.push(setInterval(netcheck, 30000));
-  timers.push(setInterval(fetchLiquidity, 60000));
-}
-
-async function runAgentsNow(){
-  $('#status').textContent = 'Running…';
-  try{
-    const r = await fetch('/agents/run-now', {method:'POST'});
-    if(!r.ok) throw new Error(await r.text());
-    $('#status').textContent = 'Agents run';
-    setTimeout(()=>$('#status').textContent='', 2500);
-  }catch(e){
-    console.error(e); $('#status').textContent = 'Run failed';
-  }
-}
-
-async function netcheck(){
-  try{
-    const r = await fetch('/llm/netcheck');
-    const ok = r.ok;
-    $('#net').className = 'pill ' + (ok?'ok':'bad');
-    $('#net').innerHTML = ok ? '<span>✅</span><span>OpenAI OK</span>' : '<span>⚠️</span><span>OpenAI unreachable</span>';
-  }catch(e){
-    $('#net').className = 'pill bad';
-    $('#net').innerHTML = '<span>⚠️</span><span>OpenAI unreachable</span>';
-  }
-}
-
-async function fetchLiquidity(){
-  try{
-    const r = await fetch('/liquidity');
-    const j = await r.json();
-    const cls = j.risk_on ? 'ok' : 'warn';
-    $('#liq').className = 'pill '+cls;
-    $('#liq').innerHTML = j.error ? `<span>⚠️</span><span>Error</span>` : (j.risk_on ? '<span>✅</span><span>Risk-on</span>' : '<span>⚠️</span><span>Risk-off</span>');
-  }catch(e){
-    $('#liq').className = 'pill bad';
-    $('#liq').innerHTML = '<span>⚠️</span><span>Unavailable</span>';
-  }
-}
-
-async function fetchTop(){
-  if(!current) return;
-  try{
-    // legacy signals (best bid/ask, rvol, mom1, cache size)
-    const sig = await (await fetch(`/signals?symbol=${encodeURIComponent(current)}`)).json();
-    $('#bb').textContent = fmtNum(sig.best_bid, 2);
-    $('#ba').textContent = fmtNum(sig.best_ask, 2);
-    $('#cached').textContent = fmtNum(sig.trades_cached, 0);
-    $('#mom1').textContent = fmtNum(sig.mom1_bps, 1);
-    $('#rvol').textContent = fmtNum(sig.rvol_vs_recent, 2);
-
-    // bars-based per-TF signals
-    const tf = await (await fetch(`/signals_tf?symbol=${encodeURIComponent(current)}`)).json();
-    $('#mom5').textContent = fmtNum(tf.mom_bps_5m, 1);
-    $('#pxv').textContent = fmtNum(tf.px_vs_vwap_bps_1m, 1);
-
-    // update trend score numbers from latest findings
-    const findings = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=5`)).json();
-    const list = Array.isArray(findings.findings)? findings.findings : [];
-    const ts = list.find(x => x.agent === 'trend_score');
-    if (ts && ts.details){
-      const d = ts.details;
-      $('#p_up').textContent = fmtNum(d.p_up, 3);
-      $('#p_breakdown').textContent = `p_1m=${fmtNum(d.p_1m,3)} · p_5m=${fmtNum(d.p_5m,3)} · p_15m=${fmtNum(d.p_15m,3)}`;
-    }
-  }catch(e){ console.error(e); }
-}
-
-// ---- fetch helpers ----
+  // ---------- request wrapper ----------
   async function jget(path, params={}) {
     const u = new URL(path, window.location.origin);
-    for (const [k,v] of Object.entries(params)) u.searchParams.set(k, v);
-    const r = await fetch(u.toString(), {cache:'no-cache'});
-    // If server ever returns HTML error, avoid JSON parse blowups
+    Object.entries(params).forEach(([k,v]) => u.searchParams.set(k, v));
+    const r = await fetch(u.toString(), { cache: 'no-cache' });
     const ct = r.headers.get('content-type') || '';
     if (!ct.includes('application/json')) {
-      const text = await r.text();
-      throw new Error(`Non-JSON response ${r.status}: ${text.slice(0,120)}`);
+      const t = await r.text();
+      throw new Error(`Non-JSON ${r.status}: ${t.slice(0,160)}`);
     }
     return r.json();
   }
 
- const fmtBps = n => (Number.isFinite(n) ? Math.round(n) : 0);
- const fmtNum = n => (Number.isFinite(n) ? n : 0);
- const pct    = x => (Number.isFinite(x) ? Math.round(x*100) : 0);
-    
- // ---- updaters ----
+  // ---------- symbol init ----------
+  async function initSymbols() {
+    const h = await jget('/health');
+    const symbols = h.symbols || [];
+    elSymbol.innerHTML = symbols.map(s => `<option>${s}</option>`).join('');
+    // initial symbol from query string (if any)
+    const url = new URL(window.location.href);
+    const qs = url.searchParams.get('symbol');
+    if (qs && symbols.includes(qs)) elSymbol.value = qs;
+    updateCSVLink();
+  }
+
+  function updateCSVLink() {
+    elCSV.href = `/export-csv?symbol=${encodeURIComponent(elSymbol.value)}&limit=500`;
+  }
+
+  // ---------- tiles ----------
   async function updateSignals() {
-    const symbol = getSymbol();
-    const data = await jget('/signals', {symbol});
-    // header/footer basics
-    if (bestBidEl)  bestBidEl.textContent = data.best_bid ?? '—';
-    if (bestAskEl)  bestAskEl.textContent = data.best_ask ?? '—';
-    if (tradesEl)   tradesEl.textContent  = data.trades_cached ?? 0;
-    // if you also show “Price vs VWAP (bps)” from /signals (or take from /signals_tf below)
-    if (cardPxv1m)  cardPxv1m.textContent = fmtBps(data.px_vs_vwap_bps);
-    // momentum 1m on this endpoint is often sparse—prefer /signals_tf for the tiles
+    const symbol = elSymbol.value;
+    const s = await jget('/signals', {symbol});
+    elBid.textContent = fmt(s.best_bid, 2);
+    elAsk.textContent = fmt(s.best_ask, 2);
+    elCached.textContent = Number(s.trades_cached || 0);
+    // we prefer momentum from /signals_tf for both 1m & 5m (consistent source)
   }
 
   async function updateSignalsTF() {
-    const symbol = getSymbol();
+    const symbol = elSymbol.value;
     const tf = await jget('/signals_tf', {symbol});
-    if (cardMom1m) cardMom1m.textContent = fmtBps(tf.mom_bps_1m);
-    if (cardMom5m) cardMom5m.textContent = fmtBps(tf.mom_bps_5m);
-    // If you prefer px_vs_vwap from /signals_tf too:
-    if (cardPxv1m && Number.isFinite(tf.px_vs_vwap_bps_1m)) {
-      cardPxv1m.textContent = fmtBps(tf.px_vs_vwap_bps_1m);
-    }
-    if (cardRvol) {
-      const r = tf.rvol_1m ?? 0;
-      cardRvol.textContent = Number.isFinite(r) ? r.toFixed(2) : '0.00';
-    }
+    elMom1.textContent = bps(tf.mom_bps_1m);
+    elMom5.textContent = bps(tf.mom_bps_5m);
+    elPxV.textContent  = bps(tf.px_vs_vwap_bps_1m);
+    const r = tf.rvol_1m ?? tf.rvol_5m ?? 0;
+    elRvol.textContent = Number.isFinite(+r) ? (+r).toFixed(2) : '—';
   }
 
   async function updateTrend() {
-    const symbol = getSymbol();
-
-    // First try DB-backed finding
+    const symbol = elSymbol.value;
+    // try DB finding first
     try {
-      const f = await jget('/findings', {symbol, agent:'trend_score', limit:1});
+      const f = await jget('/findings', {symbol, agent: 'trend_score', limit: 1});
       if (f.findings && f.findings.length) {
-        const row = f.findings[0];
+        const row = f.findings[0] || {};
         const d = row.details || {};
-        if (cardTrend) cardTrend.textContent = pct(d.p_up ?? row.score);
-        if (cardP1m)   cardP1m.textContent  = `p_1m=${pct(d.p_1m ?? 0)}`;
-        if (cardP5m)   cardP5m.textContent  = `p_5m=${pct(d.p_5m ?? 0)}`;
-        if (cardP15m)  cardP15m.textContent = `p_15m=${pct(d.p_15m ?? 0)}`;
-        return; // success via DB
+        elPUp.textContent = pct(d.p_up ?? row.score);
+        elPBreak.textContent = `p_1m=${pct(d.p_1m)} · p_5m=${pct(d.p_5m)} · p_15m=${pct(d.p_15m)}`;
+        return;
       }
-    } catch (e) {
-      // fall through to live
-    }
-
-    // Live fallback
+    } catch {}
+    // live fallback
     try {
-      const live = await jget('/trend_now', {symbol});
-      if (cardTrend) cardTrend.textContent = pct(live.p_up);
-      if (cardP1m)   cardP1m.textContent  = `p_1m=${pct(live.p_1m)}`;
-      if (cardP5m)   cardP5m.textContent  = `p_5m=${pct(live.p_5m)}`;
-      if (cardP15m)  cardP15m.textContent = `p_15m=${pct(live.p_15m)}`;
-    } catch (e) {
-      if (cardTrend) cardTrend.textContent = '—';
+      const t = await jget('/trend_now', {symbol});
+      elPUp.textContent = pct(t.p_up);
+      elPBreak.textContent = `p_1m=${pct(t.p_1m)} · p_5m=${pct(t.p_5m)} · p_15m=${pct(t.p_15m)}`;
+    } catch {
+      elPUp.textContent = '—';
+      elPBreak.textContent = 'p_1m=— · p_5m=— · p_15m=—';
     }
   }
 
-  async function updateFindings(replace=false) {
-    const symbol = getSymbol();
-    const data = await jget('/findings', {symbol, limit: 30});
-    // Simple re-render (or do incremental append if you track the last ts)
-    if (findingsList) {
-      findingsList.innerHTML = '';
-      (data.findings || []).forEach(row => {
-        const li = document.createElement('li');
-        const {agent, score, ts_utc, label, details} = row;
-        const rvol = details?.rvol ?? details?.rvol_1m ?? '';
-        const mom1 = details?.mom1_bps ?? details?.mom_bps_1m ?? '';
-        const pxvw = details?.px_vs_vwap_bps ?? details?.px_vs_vwap_bps_1m ?? '';
-        li.textContent = `${label} • ${new Date(ts_utc).toLocaleTimeString()} — RVOL=${rvol} · mom1=${mom1} · px-vwap=${pxvw}`;
-        findingsList.appendChild(li);
-      });
+  function renderFinding(f) {
+    const d = f.details || {};
+    const hdr = `<b>${esc(f.label || f.agent)}</b> • <span class="mono">${fmt(f.score,1)}</span> • <span class="muted mono">${new Date(f.ts_utc).toLocaleTimeString()}</span>`;
+    if (f.agent === 'trend_score') {
+      return `<div class="finding"><div>${hdr}</div>
+        <div class="muted mono" style="margin-top:4px">p_up=${fmt(d.p_up,3)} · p_1m=${fmt(d.p_1m,3)} · p_5m=${fmt(d.p_5m,3)} · p_15m=${fmt(d.p_15m,3)}</div>
+      </div>`;
     }
-  }
-
-  // ---- master refresh ----
-  let timer = null;
-  async function refreshAll(immediate=false) {
-    // Cancel any pending timer during symbol switch
-    if (timer) { clearTimeout(timer); timer = null; }
-
-    try {
-      await Promise.all([
-        updateSignals(),
-        updateSignalsTF(),
-        updateTrend(),
-        updateFindings(true),
-      ]);
-    } catch (e) {
-      console.warn('refresh error', e);
-    } finally {
-      timer = setTimeout(refreshAll, 5000);
+    if (f.agent === 'rvol_spike') {
+      const rv = d.rvol_1m5_vs20 ?? d.rvol ?? d.rvol_1m;
+      const m1 = d.mom_bps_1m ?? d.mom1_bps;
+      const vx = d.px_vs_vwap_bps_1m ?? d.px_vs_vwap_bps;
+      return `<div class="finding"><div>${hdr}</div>
+        <div class="muted" style="margin-top:4px">RVOL=${fmt(rv,2)} · mom1=${bps(m1)} · px-vwap=${bps(vx)}</div>
+      </div>`;
     }
+    return `<div class="finding"><div>${hdr}</div></div>`;
   }
 
-  // Boot
-  refreshAll(true);
-})();
-
-    
-function actionPill(act){
-  const m = {observe:'', prepare:'', 'consider-entry':'ok', 'consider-exit':'warn'};
-  const cls = m[act]||'';
-  return `<span class="pill ${cls}">${esc(act)}</span>`;
-}
-
-function renderFinding(f){
-  const d = f.details||{};
-  const header = `<b>${esc(f.agent)}</b> • <span class="mono">${fmtNum(f.score,1)}</span> • <span class="muted mono">${new Date(f.ts_utc).toLocaleTimeString()}</span>`;
-
-  if (f.agent==='llm_analyst'){
-    let tweaks = '';
-    if (Array.isArray(d.tweaks) && d.tweaks.length){
-      tweaks = '<div class="muted" style="margin-top:4px">'+d.tweaks.slice(0,3).map(t=>`${esc(t.param)} ${t.delta>0?'+':''}${fmtNum(t.delta,2)} (${esc(t.reason||'')})`).join(' · ')+'</div>';
-    }
-    return `<div class="finding"><div>${header}</div>
-      <div><b>Action:</b> ${actionPill(d.action||'observe')} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
-      ${d.rationale ? `<div class="muted" style="margin:4px 0 0 2px">${esc(d.rationale)}</div>` : ''}
-      ${tweaks}
-    </div>`;
+  async function updateFindings() {
+    const symbol = elSymbol.value;
+    const res = await jget('/findings', {symbol, limit: 50});
+    const list = Array.isArray(res.findings) ? res.findings : [];
+    elFindings.innerHTML = list.map(renderFinding).join('') || '<div class="muted">No findings yet.</div>';
   }
 
-  if (f.agent==='trend_score'){
-    const p=d;
-    return `<div class="finding"><div>${header}</div>
-      <div class="muted mono" style="margin-top:4px">p_up=${fmtNum(p.p_up,3)} · p_1m=${fmtNum(p.p_1m,3)} · p_5m=${fmtNum(p.p_5m,3)} · p_15m=${fmtNum(p.p_15m,3)}</div>
-    </div>`;
-  }
-
-  if (f.agent==='rvol_spike'){
-    return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">RVOL=${fmtNum(d.rvol_1m5_vs20 ?? d.rvol,2)} · mom1=${fmtNum(d.mom_bps_1m,1)} · px-vwap=${fmtNum(d.px_vs_vwap_bps_1m,1)}</div>
-    </div>`;
-  }
-
-  if (f.agent==='cvd_divergence' || f.agent==='cvd_div_bearish' || f.agent==='cvd_div_bullish'){
-    const lab = f.agent.includes('bearish')?'Bearish':'Bullish';
-    return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">${lab} price/CVD divergence</div>
-    </div>`;
-  }
-
-  if (f.agent==='posture_guard' || f.agent==='posture_exit'){
-    return `<div class="finding"><div>${header}</div>
-      <div><b>Action:</b> ${actionPill(d.action||'consider-exit')} <span class="muted">conf ${fmtNum(d.confidence,2)}</span></div>
-    </div>`;
-  }
-
-  if (f.agent==='session_reversal' || f.agent==='open_drive_reversal'){
-    return `<div class="finding"><div>${header}</div>
-      <div class="muted" style="margin-top:4px">Reversal prototype hit (ATR impulse + failure)</div>
-    </div>`;
-  }
-
-  return `<div class="finding"><div>${header}</div></div>`;
-}
-
-async function fetchFindings(){
-  try{
-    const res = await (await fetch(`/findings?symbol=${encodeURIComponent(current)}&limit=50`)).json();
-    const list = Array.isArray(res.findings)? res.findings : [];
-    $('#findings').innerHTML = list.map(renderFinding).join('') || '<div class="muted">No findings yet.</div>';
-  }catch(e){ console.error(e); }
-}
-
-async function fetchHealth(){
-  try{
-    const h = await (await fetch('/agents')).json();
+  async function updateHealth() {
+    const h = await jget('/agents');
     const now = Date.now();
-    const stale = 60;
-    $('#health').innerHTML = Object.entries(h.agents||{}).map(([agent,obj])=>{
-      const age = obj.last_run ? (now-new Date(obj.last_run).getTime())/1000 : 9e9;
-      const cls = age>stale ? 'stale' : 'ok';
-      const label = age>stale ? 'STALE' : 'OK';
-      return `<div class="agent"><div class="row"><div><b>${agent}</b></div><div class="${cls}">${label}</div></div>
-        <div class="muted" style="margin-top:6px">Last run: ${obj.last_run?ago(obj.last_run):'—'}</div></div>`;
+    const stale = 60; // s
+    elHealth.innerHTML = (h.agents || []).map(rec => {
+      const age = rec.last_run ? (now - new Date(rec.last_run).getTime())/1000 : 9e9;
+      const cls = age > stale ? 'stale' : 'ok';
+      const label = age > stale ? 'STALE' : 'OK';
+      return `<div class="agent">
+        <div class="row"><div><b>${esc(rec.agent)}</b></div><div class="${cls}">${label}</div></div>
+        <div class="muted" style="margin-top:6px">Last run: ${rec.last_run ? ago(rec.last_run) : '—'}</div>
+      </div>`;
     }).join('');
-  }catch(e){ console.error(e); }
-}
+  }
 
-init();
+  async function updateLiq() {
+    try{
+      const j = await jget('/liquidity');
+      elLiq.className = 'pill ' + (j.risk_on ? 'ok' : 'warn');
+      elLiq.innerHTML = j.risk_on ? '<span>✅</span><span>Risk-on</span>' : '<span>⚠️</span><span>Risk-off</span>';
+    }catch{
+      elLiq.className = 'pill bad';
+      elLiq.innerHTML = '<span>⚠️</span><span>Unavailable</span>';
+    }
+  }
+
+  async function updateNet() {
+    try { await fetch('/llm/netcheck', {cache: 'no-cache'}); elNet.className='pill ok'; elNet.innerHTML='<span>✅</span><span>OpenAI OK</span>'; }
+    catch { elNet.className='pill bad'; elNet.innerHTML='<span>⚠️</span><span>OpenAI unreachable</span>'; }
+  }
+
+  // ---------- run now ----------
+  async function runAgentsNow() {
+    const symbol = elSymbol.value;
+    elStatus.textContent = 'Running…';
+    try {
+      const names = ['rvol_spike','cvd_divergence','trend_score','llm_analyst'].join(',');
+      const u = `/agents/run-now?insert=true&symbol=${encodeURIComponent(symbol)}&names=${encodeURIComponent(names)}`;
+      const r = await fetch(u, { method: 'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      elStatus.textContent = 'Agents run';
+      setTimeout(()=> elStatus.textContent='', 2500);
+      // force a quick refresh of findings
+      updateFindings();
+    } catch (e) {
+      console.error(e);
+      elStatus.textContent = 'Run failed';
+    }
+  }
+
+  // ---------- loop control ----------
+  function resetLoops() {
+    clearTimers();
+    updateCSVLink();
+    // prime once
+    updateSignals(); updateSignalsTF(); updateTrend(); updateFindings(); updateHealth(); updateLiq(); updateNet();
+    // schedule
+    const iv = (+elRefresh.value || 5) * 1000;
+    timers.push(setInterval(updateSignals,   iv));
+    timers.push(setInterval(updateSignalsTF, iv));
+    timers.push(setInterval(updateTrend,     Math.max(10_000, iv)));
+    timers.push(setInterval(updateFindings,  iv));
+    timers.push(setInterval(updateHealth,    15_000));
+    timers.push(setInterval(updateLiq,       60_000));
+    timers.push(setInterval(updateNet,       60_000));
+  }
+
+  // ---------- boot ----------
+  (async function boot(){
+    await initSymbols();
+    resetLoops();
+    elSymbol.addEventListener('change', () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set('symbol', elSymbol.value);
+      history.replaceState(null,'',url.toString());
+      resetLoops();
+    });
+    elRefresh.addEventListener('change', resetLoops);
+    $('#run').addEventListener('click', runAgentsNow);
+  })();
+})();
 </script>
 </body>
 </html>
