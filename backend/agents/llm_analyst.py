@@ -21,8 +21,8 @@ class LLMAnalystAgent(Agent):
             return None
 
         from ..signals import compute_signals_tf, compute_signals
-        tf = await compute_signals_tf(symbol)
-        s = await compute_signals(symbol)
+        tf = compute_signals_tf(symbol)
+        s  = compute_signals(symbol) 
 
         score = (
             abs(tf.get("mom_bps_1m", 0))
