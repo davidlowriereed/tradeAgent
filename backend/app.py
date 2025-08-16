@@ -18,7 +18,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health, connect_async, pg_conn
+from .db import db_health, connect_pool, ensure_schema
 from .services.market import market_loop
 
 app = FastAPI(title="Opportunity Radar")
@@ -57,9 +57,10 @@ async def debug_llm(symbol: str = "BTC-USD"):
 @app.on_event("startup")
 async def _startup():
     import asyncio
+    await connect_pool()    # establish TLS pool
+    await ensure_schema()   # create tables if needed
     asyncio.create_task(agents_loop())
-    asyncio.create_task(market_loop())   # <-- start feed (stub or real)
-    asyncio.create_task(connect_async()) # warm up DB; /db-health should go ok:true
+    asyncio.create_task(market_loop())
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
