@@ -94,14 +94,15 @@ async def agents_loop():
 
                         # Prefer the positional signature (matches your /agents/run-now usage)
                         try:
-                            await insert_finding(
-                                agent.name,
-                                sym,
-                                float(finding.get("score", 0.0)),
-                                finding.get("label", agent.name),
-                                finding.get("details") or {},
-                            )
+                            await insert_finding({
+                                "agent": agent.name,
+                                "symbol": sym,
+                                "score": float(finding.get("score", 0.0)),
+                                "label": finding.get("label", agent.name),
+                                "details": finding.get("details") or {},
+                            })
                         except Exception:
+                                            
                             # Fallback to in-memory ring buffer if DB is unavailable
                             RECENT_FINDINGS.append({
                                 "agent": agent.name,
