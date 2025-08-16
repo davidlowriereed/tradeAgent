@@ -127,32 +127,34 @@ async def agents():
     m = list_agents_last_run()
     return {"agents": [{"agent": k, "last_run": v.get("last_run")} for k, v in m.items()]}
 
-@app.post("/agents/run-now")
-async def agents_run_now(names: str, symbol: str, insert: bool = True):
-    # Minimal synchronous trigger: find agents and call run_once
-    names_set = {n.strip() for n in names.split(",") if n.strip()}
-    ran = []
-    results = []
-    for agent in AGENTS:
-        if agent.name in names_set:
-            try:
-                finding = await agent.run_once(symbol)
-                ran.append(agent.name)
-                if finding:
-                    results.append({"agent": agent.name, "finding": finding})
-                    if insert:
-                        from .db import insert_finding
-                        await insert_finding({
-                           "agent": agent.name,
-                           "symbol": symbol,
-                           "score": float(finding.get("score", 0.0)),
-                           "label": finding.get("label", agent.name),
-                           "details": finding.get("details") or {},
-                        })
+AGENT_BY_NAME = {a.name: a for a in AGENTS}
 
-            except Exception as e:
-                results.append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
-    return {"ok": True, "ran": ran, "results": results}
+@app.post("/agents/run-now")
+async def run_now(names: str, symbol: str, insert: bool = False):
+    out = {"ok": True, "ran": [], "results": []}
+    for name in [n.strip() for n in names.split(",") if n.strip()]:
+        agent = AGENT_BY_NAME.get(name)
+        if not agent:
+            out["results"].append({"agent": name, "error": "unknown agent"})
+            continue
+        try:
+            finding = await agent.run_once(symbol)          # <-- await the coroutine
+            if finding and insert:
+                await insert_finding({                      # <-- await the DB insert (coroutine)
+                    "agent": agent.name,
+                    "symbol": symbol,
+                    "score": float(finding.get("score", 0.0)),
+                    "label": finding.get("label", agent.name),
+                    "details": finding.get("details") or {},
+                })
+            out["ran"].append(agent.name)
+            out["results"].append(
+                {"agent": agent.name, "finding": finding} if finding
+                else {"agent": agent.name, "finding": None}
+            )
+        except Exception as e:
+            out["results"].append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
+    return out
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
