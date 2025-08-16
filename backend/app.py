@@ -24,6 +24,36 @@ from .services.market import market_loop
 app = FastAPI(title="Opportunity Radar")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
+# at top
+import os
+from fastapi import HTTPException
+
+@app.get("/debug/env")
+async def debug_env():
+    def present(name): return bool(os.getenv(name))
+    return {
+        "LLM_ENABLE": os.getenv("LLM_ENABLE"),
+        "OPENAI_MODEL": os.getenv("OPENAI_MODEL"),
+        "OPENAI_API_KEY_present": present("OPENAI_API_KEY"),
+        "LLM_ANALYST_ENABLED": os.getenv("LLM_ANALYST_ENABLED"),
+    }
+
+@app.get("/debug/llm")
+async def debug_llm(symbol: str = "BTC-USD"):
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        rsp = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
+            messages=[{"role":"user","content":f"ping for {symbol}. Reply with {{\"pong\":true}}"}],
+            temperature=0, max_tokens=10,
+        )
+        return {"ok": True, "model": rsp.model, "first": rsp.choices[0].message.content}
+    except Exception as e:
+        # Surface exact error to unblock (auth/model/network)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.on_event("startup")
 async def _startup():
     import asyncio
