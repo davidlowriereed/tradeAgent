@@ -4,7 +4,7 @@ from .base import Agent
 import os, json, re
 from ..db import heartbeat
 
-LLM_ENABLE = os.getenv("LLM_ENABLE", "false").lower() in ("1","true","yes")
+LLM_ENABLE = os.getenv("LLM_ENABLE", "false").lower() in ("1", "true", "yes")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini-2024-07-18")
 MIN_CONF = float(os.getenv("LLM_ALERT_MIN_CONF", "0.6"))
 MIN_SCORE = float(os.getenv("LLM_ANALYST_MIN_SCORE", "0.0"))
@@ -12,6 +12,7 @@ RATIONALE_CHARS = int(os.getenv("ALERT_RATIONALE_CHARS", "400"))
 
 class LLMAnalystAgent(Agent):
     name = "llm_analyst"
+
     def __init__(self, interval_sec: int = 60):
         super().__init__(self.name, interval_sec)
 
@@ -21,7 +22,7 @@ class LLMAnalystAgent(Agent):
 
         from ..signals import compute_signals_tf, compute_signals
         tf = await compute_signals_tf(symbol)
-        s  = await compute_signals(symbol)
+        s = await compute_signals(symbol)
 
         score = (
             abs(tf.get("mom_bps_1m", 0))
@@ -32,17 +33,17 @@ class LLMAnalystAgent(Agent):
 
         posture, conf, rationale = "no_position", 0.5, "Neutral"
 
-         try:
+        try:
             from openai import OpenAI
             client = OpenAI()
 
             prompt = (
                 f"Given features for {symbol}:\n"
-                f"mom_1m={tf.get('mom_bps_1m',0)} bps, "
-                f"mom_5m={tf.get('mom_bps_5m',0)} bps, "
-                f"mom_15m={tf.get('mom_bps_15m',0)} bps,\n"
-                f"vwap_1m={tf.get('px_vs_vwap_bps_1m',0)} bps, "
-                f"rvol_1m={tf.get('rvol_1m',1.0)},\n"
+                f"mom_1m={tf.get('mom_bps_1m', 0)} bps, "
+                f"mom_5m={tf.get('mom_bps_5m', 0)} bps, "
+                f"mom_15m={tf.get('mom_bps_15m', 0)} bps,\n"
+                f"vwap_1m={tf.get('px_vs_vwap_bps_1m', 0)} bps, "
+                f"rvol_1m={tf.get('rvol_1m', 1.0)},\n"
                 f"trend_p_up={s.get('trend_p_up', 0.5)}.\n"
                 "Recommend one of: LONG, SHORT, or FLAT. "
                 "Return JSON {\"posture\":\"...\",\"confidence\":0-1,\"rationale\":\"...\"}.\n"
@@ -72,11 +73,16 @@ class LLMAnalystAgent(Agent):
             await heartbeat(self.name, f"error: {type(e).__name__}")
             return None
 
+        # (Restored) gate low-signal outputs
+        if conf < MIN_CONF and score < MIN_SCORE:
+            return None
+
         return {
             "score": round(max(score, conf * 10), 2),
             "label": "llm_signal",
             "details": {
-                "posture": posture, "confidence": conf,
+                "posture": posture,
+                "confidence": conf,
                 "trend_p_up": s.get("trend_p_up", 0.5),
                 "mom_1m": tf.get("mom_bps_1m", 0),
                 "rvol_1m": tf.get("rvol_1m", 1.0),
