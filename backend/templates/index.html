@@ -1,336 +1,400 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Opportunity Radar — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
-    :root{
-      --bg:#0f1115;--card:#171a21;--muted:#9aa4b2;--text:#e8edf2;--ok:#38d39f;--warn:#f5c451;--bad:#ff6b6b;--blue:#5aa2ff;
-      --line:#2a2f3a;
+    :root {
+      --bg: #0f1217;
+      --panel: #151a21;
+      --muted: #a7b0bf;
+      --ok: #2ecc71;
+      --warn: #f1c40f;
+      --err: #e74c3c;
+      --accent: #5b9cff;
+      --grid: 16px;
+      --radius: 14px;
     }
-    *{box-sizing:border-box}
-    body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
-    header, footer{position:sticky;z-index:5;background:linear-gradient(180deg,var(--bg),#0f1115f0);backdrop-filter: blur(2px);}
-    header{top:0;border-bottom:1px solid var(--line);padding:10px 14px}
-    footer{bottom:0;border-top:1px solid var(--line);padding:10px 14px}
-    .wrap{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-    h1{font-size:18px;margin:0 8px 0 0}
-    select,button,input{background:#0e1117;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
-    button{cursor:pointer}
-    main{height:calc(100vh - 178px); /* header + footer approx */ overflow:auto; padding:10px 14px;}
-    .cards{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:10px}
-    .card{background:var(--card);border:1px solid var(--line);padding:12px;border-radius:12px;box-shadow:0 0 0 1px rgba(255,255,255,0.02) inset}
-    .title{font-weight:600;margin-bottom:6px}
-    .muted{color:var(--muted)}
-    .big{font-size:24px;font-weight:700}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
-    .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
-    .pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;border:1px solid var(--line);gap:6px}
-    .pill.ok{background:#10291f;border-color:#204d3c;color:#8be8be}
-    .pill.bad{background:#321619;border-color:#5b1e26;color:#ff9aa5}
-    .pill.warn{background:#332a14;border-color:#6b5214;color:#ffd77a}
-    .health{display:grid;grid-template-columns:repeat(4,minmax(200px,1fr));gap:10px}
-    .agent{background:var(--card);border:1px solid var(--line);padding:10px;border-radius:10px}
-    .agent .ok{color:var(--ok)} .agent .stale{color:var(--bad)}
-    .finding{border-bottom:1px dashed var(--line);padding:10px 6px}
-    .finding:last-child{border-bottom:none}
-    a { color: var(--blue); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .top-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 10px}
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: #e6edf3; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 18px 18px 120px; }
+    header { display:flex; align-items:center; gap:12px; margin-bottom: 16px; }
+    h1 { font-size: 18px; margin: 0 12px 0 0; font-weight: 700; }
+    .controls { display:flex; flex-wrap: wrap; gap: 10px; align-items:center; }
+    select, button, .pill { background: var(--panel); border: 1px solid #2a2f39; color: #e6edf3; padding: 8px 10px; border-radius: 10px; font-size: 13px; }
+    button:hover { border-color: #3a4150; cursor: pointer; }
+    .pill { display:inline-flex; align-items:center; gap:8px; }
+    .pill .dot { width:8px; height:8px; border-radius:50%; }
+
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid); }
+    .card {
+      background: var(--panel);
+      border: 1px solid #222935;
+      border-radius: var(--radius);
+      padding: 14px;
+      min-height: 88px;
+    }
+    .card h3 { margin:0 0 6px; font-size: 12px; letter-spacing:.02em; color: var(--muted); font-weight:600; }
+    .value { font-size: 22px; font-weight: 700; }
+    .sub { color: var(--muted); font-size: 12px; }
+    .row { display:flex; gap:12px; align-items:center; justify-content: space-between; }
+    .kpis { grid-column: 1 / span 12; display:grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid); }
+
+    .kpis .card { min-height: 120px; }
+    .span-3 { grid-column: span 3; }
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+
+    .list { max-height: 280px; overflow: auto; border-radius: 10px; border: 1px solid #222935; }
+    .list table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .list th, .list td { padding: 8px 10px; border-bottom: 1px solid #202633; vertical-align: top; }
+    .list td:nth-child(3){ word-break: break-word; }
+    code.json { background:#0e1320; border:1px solid #1f2633; padding:2px 6px; border-radius:6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; color:#9fb0d1; }
+    .list tr:hover td { background: #11161f; }
+
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight:600; border:1px solid transparent; }
+    .ok    { color: #9ae7bc; background: #103921; border-color:#1d5d37; }
+    .warn  { color: #ffe58a; background: #3b3109; border-color:#6a5b13; }
+    .err   { color: #ffb4b4; background: #3a0f0f; border-color:#6a1e1e; }
+    .muted { color: var(--muted); }
+
+    .footer { position: fixed; bottom: 0; left:0; right:0; background: #0d1015ea; border-top: 1px solid #1f2633; backdrop-filter: blur(4px); }
+    .footer .inner { max-width: 1400px; margin: 0 auto; padding: 10px 16px; display:flex; gap:16px; align-items:center; justify-content: space-between; font-size: 12px; color: var(--muted); }
+    .charts { display:grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid); }
+    canvas { width: 100% !important; height: 220px !important; }
   </style>
 </head>
 <body>
-
-<header>
   <div class="wrap">
-    <h1>Opportunity Radar</h1>
-    <label class="muted">Symbol</label>
-    <select id="symbol"></select>
-    <label class="muted">Auto-refresh</label>
-    <select id="refresh">
-      <option value="3">3s</option>
-      <option value="5" selected>5s</option>
-      <option value="10">10s</option>
-      <option value="30">30s</option>
-    </select>
-    <button id="run">Run agents now</button>
-    <span class="muted" id="status"></span>
-    <span style="flex:1"></span>
-    <a id="csv" href="#" class="pill"><span>⬇</span><span>Export CSV</span></a>
-  </div>
-
-  <div class="cards" style="margin-top:8px">
-    <div class="card">
-      <div class="title">Trend Score (p_up)</div>
-      <div class="big mono" id="p_up">—</div>
-      <div class="muted mono" id="p_breakdown">p_1m=— · p_5m=— · p_15m=—</div>
-    </div>
-    <div class="card">
-      <div class="title">Price vs VWAP (bps)</div>
-      <div class="big mono" id="pxv">—</div>
-      <div class="muted">1m window</div>
-    </div>
-    <div class="card">
-      <div class="title">Momentum</div>
-      <div class="row">
-        <div><div class="muted">1m</div><div class="big mono" id="mom1">—</div></div>
-        <div><div class="muted">5m</div><div class="big mono" id="mom5">—</div></div>
+    <header>
+      <h1>Opportunity Radar</h1>
+      <div class="controls">
+        <label class="muted">Symbol</label>
+        <select id="symbol"></select>
+        <label class="muted">Auto‑refresh</label>
+        <select id="interval">
+          <option value="3">3s</option>
+          <option value="5" selected>5s</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+        </select>
+        <button id="runNow">Run agents now</button>
+        <button id="exportCsv">Export CSV</button>
+        <span class="pill" id="debugSymbol"><span class="dot" style="background:var(--accent)"></span><span>symbol: —</span></span>
       </div>
-    </div>
-    <div class="card">
-      <div class="title">RVOL (5 vs 20)</div>
-      <div class="big mono" id="rvol">—</div>
-      <div class="muted">bar-based</div>
+    </header>
+
+    <!-- KPI row -->
+    <section class="kpis">
+      <div class="card span-3" id="kpi-trend">
+        <h3>Trend Score (p_up)</h3>
+        <div class="value" id="trendScore">–</div>
+        <div class="sub" id="trendSub">p_1m=– · p_5m=– · p_15m=–</div>
+      </div>
+      <div class="card span-3">
+        <h3>Price vs VWAP (bps)</h3>
+        <div class="value" id="vwapBps">0</div>
+        <div class="sub">1m window</div>
+      </div>
+      <div class="card span-3">
+        <h3>Momentum</h3>
+        <div class="row">
+          <div><div class="sub">1m</div><div class="value" id="mom1">0</div></div>
+          <div><div class="sub">5m</div><div class="value" id="mom5">0</div></div>
+        </div>
+      </div>
+      <div class="card span-3">
+        <h3>RVOL (5 vs 20)</h3>
+        <div class="value" id="rvol">1.00x</div>
+        <div class="sub">bar‑based</div>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="charts" style="margin-top:16px">
+      <div class="card span-6">
+        <h3>Momentum — 1m / 5m / 15m</h3>
+        <canvas id="chartMom"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>VWAP deviation (bps) — 1m / 5m / 15m</h3>
+        <canvas id="chartVWAP"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>Trend score over time</h3>
+        <canvas id="chartTrend"></canvas>
+      </div>
+      <div class="card span-6">
+        <h3>TF alignment (momentum)</h3>
+        <div class="sub" id="alignText">mixed</div>
+        <canvas id="chartAlign"></canvas>
+      </div>
+    </section>
+
+    <!-- Latest findings -->
+    <section style="margin-top:16px" class="grid">
+      <div class="card span-8">
+        <h3>Latest Findings</h3>
+        <div class="list">
+          <table id="findings">
+            <thead><tr><th style="width:140px">ts</th><th style="width:140px">agent</th><th>label / details</th><th style="width:80px">score</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card span-4">
+        <h3>Health</h3>
+        <div id="health">
+          <div class="row"><span class="muted">API</span><span id="apiHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">DB</span><span id="dbHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">Agents</span><span id="agentsHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">LLM netcheck</span><span id="llmHealth" class="badge">–</span></div>
+          <div class="row"><span class="muted">Top of book</span><span id="tob" class="muted">–</span></div>
+          <div class="row"><span class="muted">Trades cached</span><span id="tradesCached" class="muted">0</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="footer">
+    <div class="inner">
+      <div>Last update: <span id="lastUpdate" class="muted">–</span></div>
+      <div id="statusText">Ready.</div>
     </div>
   </div>
-</header>
-
-<main>
-  <div class="title" style="margin:6px 0 8px 4px;">Latest Findings</div>
-  <div id="findings"></div>
-</main>
-
-<footer>
-  <div class="cards">
-    <div class="card">
-      <div class="title">Top of Book</div>
-      <div class="row mono"><div>Bid</div><div id="bb">—</div></div>
-      <div class="row mono"><div>Ask</div><div id="ba">—</div></div>
-    </div>
-    <div class="card">
-      <div class="title">Trades Cached</div>
-      <div class="big mono" id="cached">0</div>
-    </div>
-    <div class="card">
-      <div class="title">Liquidity</div>
-      <div id="liq" class="pill"><span>⏳</span><span>Loading…</span></div>
-    </div>
-    <div class="card">
-      <div class="title">LLM Netcheck</div>
-      <div id="net" class="pill"><span>⏳</span><span>Checking…</span></div>
-    </div>
-  </div>
-
-  <div class="title" style="margin:12px 0 8px 4px;">Agent Health</div>
-  <div class="health" id="health"></div>
-</footer>
 
 <script>
-(() => {
-  // ---------- small helpers ----------
-  const $  = s => document.querySelector(s);
-  const esc = s => String(s ?? '').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-  const fmt = (x, d=2) => (Number.isFinite(+x) ? (+x).toFixed(d) : '—');
-  const bps = x => (Number.isFinite(+x) ? String(Math.round(+x)) : '—');
-  const pct = x => (Number.isFinite(+x) ? String(Math.round(+x*100)) : '—');
-  const ago = ts => { const t=new Date(ts), s=Math.max(0,(Date.now()-t)/1000); return s<60?`${s|0}s ago`:s<3600?`${(s/60)|0}m ago`:`${(s/3600)|0}h ago`; };
+// ======== Config ========
+const BASE = location.origin; // same host as API
+let POLL_MS = 5000;
+let SYMBOLS = ["BTC-USD","ETH-USD","ADA-USD"];
+let CURRENT = localStorage.getItem('symbol') || SYMBOLS[0];
 
-  // ---------- element refs (match your markup) ----------
-  const elSymbol = $('#symbol');
-  const elRefresh = $('#refresh');
-  const elCSV = $('#csv');
-  const elStatus = $('#status');
+// ======== DOM helpers ========
+const $ = (sel) => document.querySelector(sel);
+const fmt = (x, dp=1) => (Number.isFinite(x) ? x.toFixed(dp) : '0');
+const byId = (id) => document.getElementById(id);
 
-  const elPUp = $('#p_up');
-  const elPBreak = $('#p_breakdown');
-
-  const elPxV = $('#pxv');
-  const elMom1 = $('#mom1');
-  const elMom5 = $('#mom5');
-  const elRvol = $('#rvol');
-
-  const elBid = $('#bb');
-  const elAsk = $('#ba');
-  const elCached = $('#cached');
-
-  const elFindings = $('#findings');
-  const elHealth = $('#health');
-  const elLiq = $('#liq');
-  const elNet = $('#net');
-
-  let timers = [];
-  const clearTimers = () => { timers.forEach(clearInterval); timers = []; };
-
-  // ---------- request wrapper ----------
-  async function jget(path, params={}) {
-    const u = new URL(path, window.location.origin);
-    Object.entries(params).forEach(([k,v]) => u.searchParams.set(k, v));
-    const r = await fetch(u.toString(), { cache: 'no-cache' });
-    const ct = r.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) {
-      const t = await r.text();
-      throw new Error(`Non-JSON ${r.status}: ${t.slice(0,160)}`);
+// ======== Charts ========
+const tsFmt = (d) => new Date(d).toLocaleTimeString();
+const mkMultiLine = (ctx, labels) => new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: labels.map((l, i) => ({ label: l, data: [], tension:.25, pointRadius:0 })) },
+  options: { responsive:true, animation:false,
+    plugins:{ legend:{ display:true, labels:{ color:'#8b98b9' } } },
+    scales:{ x:{ ticks:{ color:'#8b98b9' } }, y:{ ticks:{ color:'#8b98b9' }, grid:{ color:'#202633' } } }
+  }
+});
+const mkLine = (ctx, label) => new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: [{ label, data: [], tension:.25, pointRadius:0 }] },
+  options: { responsive:true, animation:false, plugins:{ legend:{ display:false } },
+    scales:{ x:{ ticks:{ color:'#8b98b9' } }, y:{ ticks:{ color:'#8b98b9' }, grid:{ color:'#202633' } } }
+  }
+});
+const charts = {
+  mom:   mkMultiLine(byId('chartMom').getContext('2d'), ['1m','5m','15m']),
+  vwap:  mkMultiLine(byId('chartVWAP').getContext('2d'), ['1m','5m','15m']),
+  trend: mkLine(byId('chartTrend').getContext('2d'), 'p_up'),
+  align: new Chart(byId('chartAlign').getContext('2d'), {
+    type: 'bar', data: { labels: [], datasets: [{ label:'alignment', data:[] }] },
+    options: { responsive:true, animation:false, plugins:{ legend:{ display:false } },
+      scales:{ y:{ min:-1, max:1, ticks:{ stepSize:1, color:'#8b98b9' }, grid:{ color:'#202633' } }, x:{ ticks:{ display:false } } }
     }
-    return r.json();
-  }
+  })
+};
+const pushMulti = (c, label, values, max=180) => {
+  const ds = c.data.datasets; c.data.labels.push(label);
+  values.forEach((v,i)=> ds[i].data.push(Number(v)||0));
+  if (ds[0].data.length > max) { ds.forEach(d=>d.data.shift()); c.data.labels.shift(); }
+  c.update();
+};
+const pushLine = (c, label, v, max=180) => {
+  const ds = c.data.datasets[0]; c.data.labels.push(label); ds.data.push(Number(v)||0);
+  if (ds.data.length > max) { ds.data.shift(); c.data.labels.shift(); }
+  c.update();
+};
 
-  // ---------- symbol init ----------
-  async function initSymbols() {
-    const h = await jget('/health');
-    const symbols = h.symbols || [];
-    elSymbol.innerHTML = symbols.map(s => `<option>${s}</option>`).join('');
-    // initial symbol from query string (if any)
-    const url = new URL(window.location.href);
-    const qs = url.searchParams.get('symbol');
-    if (qs && symbols.includes(qs)) elSymbol.value = qs;
-    updateCSVLink();
-  }
+// ======== Fetch helpers ========
+async function j(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return await r.json();
+}
 
-  function updateCSVLink() {
-    elCSV.href = `/export-csv?symbol=${encodeURIComponent(elSymbol.value)}&limit=500`;
-  }
+// ======== UI Wiring ========
+function populateSymbols(list) {
+  const sel = byId('symbol');
+  sel.innerHTML = '';
+  list.forEach(s => {
+    const opt = document.createElement('option'); opt.value = s; opt.textContent = s; sel.appendChild(opt);
+  });
+  sel.value = CURRENT;
+}
 
-  // ---------- tiles ----------
-  async function updateSignals() {
-    const symbol = elSymbol.value;
-    const s = await jget('/signals', {symbol});
-    elBid.textContent = fmt(s.best_bid, 2);
-    elAsk.textContent = fmt(s.best_ask, 2);
-    elCached.textContent = Number(s.trades_cached || 0);
-    // we prefer momentum from /signals_tf for both 1m & 5m (consistent source)
-  }
+async function refreshHealth() {
+  try {
+    const H = await j(`${BASE}/health`);
+    SYMBOLS = H.symbols?.length ? H.symbols : SYMBOLS; populateSymbols(SYMBOLS);
+    setBadge('apiHealth', true, 'ok');
+    const a = H.agents || {}; const names = Object.keys(a);
+    const stale = names.filter(k => !a[k]?.last_run);
+    setBadge('agentsHealth', stale.length === 0, stale.length ? `${stale.length} stale` : 'ok');
+  } catch (e) { setBadge('apiHealth', false, 'down'); }
 
-  async function updateSignalsTF() {
-    const symbol = elSymbol.value;
-    const tf = await jget('/signals_tf', {symbol});
-    elMom1.textContent = bps(tf.mom_bps_1m);
-    elMom5.textContent = bps(tf.mom_bps_5m);
-    elPxV.textContent  = bps(tf.px_vs_vwap_bps_1m);
-    const r = tf.rvol_1m ?? tf.rvol_5m ?? 0;
-    elRvol.textContent = Number.isFinite(+r) ? (+r).toFixed(2) : '—';
-  }
+  try { const D = await j(`${BASE}/db-health`); setBadge('dbHealth', !!D.ok, D.ok? 'ok':'down'); } catch(e){ setBadge('dbHealth', false, 'down'); }
 
-  async function updateTrend() {
-    const symbol = elSymbol.value;
-    // try DB finding first
-    try {
-      const f = await jget('/findings', {symbol, agent: 'trend_score', limit: 1});
-      if (f.findings && f.findings.length) {
-        const row = f.findings[0] || {};
-        const d = row.details || {};
-        elPUp.textContent = pct(d.p_up ?? row.score);
-        elPBreak.textContent = `p_1m=${pct(d.p_1m)} · p_5m=${pct(d.p_5m)} · p_15m=${pct(d.p_15m)}`;
-        return;
-      }
-    } catch {}
-    // live fallback
-    try {
-      const t = await jget('/trend_now', {symbol});
-      elPUp.textContent = pct(t.p_up);
-      elPBreak.textContent = `p_1m=${pct(t.p_1m)} · p_5m=${pct(t.p_5m)} · p_15m=${pct(t.p_15m)}`;
-    } catch {
-      elPUp.textContent = '—';
-      elPBreak.textContent = 'p_1m=— · p_5m=— · p_15m=—';
+  // LLM netcheck: look for recent llm_analyst last_run in /health
+  try {
+    const H = await j(`${BASE}/health`);
+    const llm = H.agents?.llm_analyst; const ok = !!llm?.last_run;
+    setBadge('llmHealth', ok, ok? 'ok':'unreachable');
+  } catch(e){ setBadge('llmHealth', false, 'unreachable'); }
+}
+
+function setBadge(id, ok, label) {
+  const el = byId(id); el.className = `badge ${ok? 'ok':'err'}`; el.textContent = label || (ok? 'ok':'err');
+}
+
+async function refreshTiles() {
+  const s = CURRENT;
+  const tf = await j(`${BASE}/signals_tf?symbol=${encodeURIComponent(s)}`);
+  byId('mom1').textContent = fmt(tf.mom_bps_1m);
+  byId('mom5').textContent = fmt(tf.mom_bps_5m);
+  byId('vwapBps').textContent = fmt(tf.px_vs_vwap_bps_1m);
+  byId('rvol').textContent = `${fmt(tf.rvol_1m,2)}x`;
+
+  // trend score: pull from findings if present else derive simple neutral
+  try {
+    const F = await j(`${BASE}/findings?symbol=${encodeURIComponent(s)}&limit=25`);
+    const t = (F.findings||[]).find(x => x.agent === 'trend_score');
+    if (t) {
+      const d = t.details || {}; const p = (d.p_up ?? 0.5);
+      byId('trendScore').textContent = fmt(p*10,1);
+      byId('trendSub').textContent = `p_1m=${fmt(d.p_1m??0.5,2)} · p_5m=${fmt(d.p_5m??0.5,2)} · p_15m=${fmt(d.p_15m??0.5,2)}`;
+      pushLine(charts.trend, new Date().toLocaleTimeString(), p);
     }
-  }
+  } catch {}
 
-  function renderFinding(f) {
-    const d = f.details || {};
-    const hdr = `<b>${esc(f.label || f.agent)}</b> • <span class="mono">${fmt(f.score,1)}</span> • <span class="muted mono">${new Date(f.ts_utc).toLocaleTimeString()}</span>`;
-    if (f.agent === 'trend_score') {
-      return `<div class="finding"><div>${hdr}</div>
-        <div class="muted mono" style="margin-top:4px">p_up=${fmt(d.p_up,3)} · p_1m=${fmt(d.p_1m,3)} · p_5m=${fmt(d.p_5m,3)} · p_15m=${fmt(d.p_15m,3)}</div>
-      </div>`;
-    }
-    if (f.agent === 'rvol_spike') {
-      const rv = d.rvol_1m5_vs20 ?? d.rvol ?? d.rvol_1m;
-      const m1 = d.mom_bps_1m ?? d.mom1_bps;
-      const vx = d.px_vs_vwap_bps_1m ?? d.px_vs_vwap_bps;
-      return `<div class="finding"><div>${hdr}</div>
-        <div class="muted" style="margin-top:4px">RVOL=${fmt(rv,2)} · mom1=${bps(m1)} · px-vwap=${bps(vx)}</div>
-      </div>`;
-    }
-    return `<div class="finding"><div>${hdr}</div></div>`;
-  }
+  // /debug/state for TOB + trades count
+  try {
+    const S = await j(`${BASE}/debug/state?symbol=${encodeURIComponent(s)}`);
+    byId('tradesCached').textContent = S.trades_cached ?? 0;
+    const bid = (S.last_trade?.[3]) ?? null; // depends on state shape; fallback below
+    const bq = await j(`${BASE}/signals?symbol=${encodeURIComponent(s)}`);
+    byId('tob').textContent = (bq.best_bid!=null && bq.best_ask!=null) ? `${bq.best_bid} / ${bq.best_ask}` : '–';
+  } catch {}
 
-  async function updateFindings() {
-    const symbol = elSymbol.value;
-    const res = await jget('/findings', {symbol, limit: 50});
-    const list = Array.isArray(res.findings) ? res.findings : [];
-    elFindings.innerHTML = list.map(renderFinding).join('') || '<div class="muted">No findings yet.</div>';
-  }
+  // push charts for signals
+  const now = new Date().toLocaleTimeString();
+  pushMulti(charts.mom,  now, [tf.mom_bps_1m, tf.mom_bps_5m, tf.mom_bps_15m]);
+  pushMulti(charts.vwap, now, [tf.px_vs_vwap_bps_1m, tf.px_vs_vwap_bps_5m, tf.px_vs_vwap_bps_15m]);
+  // alignment: +1 if all >0, -1 if all <0, else 0
+  const sgn = (x)=> (x>0?1:(x<0?-1:0));
+  const a = sgn(tf.mom_bps_1m||0) + sgn(tf.mom_bps_5m||0) + sgn(tf.mom_bps_15m||0);
+  const align = (a===3)?1:(a===-3?-1:0);
+  byId('alignText').textContent = (align===1? 'all up' : align===-1? 'all down' : 'mixed');
+  pushLine(charts.align, now, align);
+}
 
-  async function updateHealth() {
-    const h = await jget('/agents');
-    const now = Date.now();
-    const stale = 60; // s
-    elHealth.innerHTML = (h.agents || []).map(rec => {
-      const age = rec.last_run ? (now - new Date(rec.last_run).getTime())/1000 : 9e9;
-      const cls = age > stale ? 'stale' : 'ok';
-      const label = age > stale ? 'STALE' : 'OK';
-      return `<div class="agent">
-        <div class="row"><div><b>${esc(rec.agent)}</b></div><div class="${cls}">${label}</div></div>
-        <div class="muted" style="margin-top:6px">Last run: ${rec.last_run ? ago(rec.last_run) : '—'}</div>
-      </div>`;
-    }).join('');
-  }
-
-  async function updateLiq() {
-    try{
-      const j = await jget('/liquidity');
-      elLiq.className = 'pill ' + (j.risk_on ? 'ok' : 'warn');
-      elLiq.innerHTML = j.risk_on ? '<span>✅</span><span>Risk-on</span>' : '<span>⚠️</span><span>Risk-off</span>';
-    }catch{
-      elLiq.className = 'pill bad';
-      elLiq.innerHTML = '<span>⚠️</span><span>Unavailable</span>';
-    }
-  }
-
-  async function updateNet() {
-    try { await fetch('/llm/netcheck', {cache: 'no-cache'}); elNet.className='pill ok'; elNet.innerHTML='<span>✅</span><span>OpenAI OK</span>'; }
-    catch { elNet.className='pill bad'; elNet.innerHTML='<span>⚠️</span><span>OpenAI unreachable</span>'; }
-  }
-
-  // ---------- run now ----------
-  async function runAgentsNow() {
-    const symbol = elSymbol.value;
-    elStatus.textContent = 'Running…';
-    try {
-      const names = ['rvol_spike','cvd_divergence','trend_score','llm_analyst'].join(',');
-      const u = `/agents/run-now?insert=true&symbol=${encodeURIComponent(symbol)}&names=${encodeURIComponent(names)}`;
-      const r = await fetch(u, { method: 'POST' });
-      if (!r.ok) throw new Error(await r.text());
-      elStatus.textContent = 'Agents run';
-      setTimeout(()=> elStatus.textContent='', 2500);
-      // force a quick refresh of findings
-      updateFindings();
-    } catch (e) {
-      console.error(e);
-      elStatus.textContent = 'Run failed';
-    }
-  }
-
-  // ---------- loop control ----------
-  function resetLoops() {
-    clearTimers();
-    updateCSVLink();
-    // prime once
-    updateSignals(); updateSignalsTF(); updateTrend(); updateFindings(); updateHealth(); updateLiq(); updateNet();
-    // schedule
-    const iv = (+elRefresh.value || 5) * 1000;
-    timers.push(setInterval(updateSignals,   iv));
-    timers.push(setInterval(updateSignalsTF, iv));
-    timers.push(setInterval(updateTrend,     Math.max(10_000, iv)));
-    timers.push(setInterval(updateFindings,  iv));
-    timers.push(setInterval(updateHealth,    15_000));
-    timers.push(setInterval(updateLiq,       60_000));
-    timers.push(setInterval(updateNet,       60_000));
-  }
-
-  // ---------- boot ----------
-  (async function boot(){
-    await initSymbols();
-    resetLoops();
-    elSymbol.addEventListener('change', () => {
-      const url = new URL(window.location.href);
-      url.searchParams.set('symbol', elSymbol.value);
-      history.replaceState(null,'',url.toString());
-      resetLoops();
+async function refreshFindings() {
+  const s = CURRENT; const T = byId('findings').querySelector('tbody');
+  try {
+    const F = await j(`${BASE}/findings?symbol=${encodeURIComponent(s)}&limit=50`);
+    const rows = (F.findings||[]).map(f => {
+      const tr = document.createElement('tr');
+      const html = formatDetails(f);
+      tr.innerHTML = `<td>${new Date(f.ts_utc||Date.now()).toLocaleTimeString()}</td>
+                      <td><span class="badge ${f.label==='trend_score' ? 'ok':'muted'}">${f.agent}</span></td>
+                      <td>${html}</td>
+                      <td>${fmt(Number(f.score)||0,2)}</td>`;
+      return tr;
     });
-    elRefresh.addEventListener('change', resetLoops);
-    $('#run').addEventListener('click', runAgentsNow);
-  })();
+    T.replaceChildren(...rows);
+  } catch (e) {
+    T.innerHTML = '';
+  }
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+function pct(x,dp=1){ return Number.isFinite(x) ? (x*100).toFixed(dp)+"%" : "–"; }
+function formatDetails(f){
+  const d = f.details || {}; const label = f.label || f.agent;
+  if (label === 'trend_score'){
+    const p = Number(d.p_up ?? 0.5);
+    const p1 = Number(d.p_1m ?? 0.5), p5 = Number(d.p_5m ?? 0.5), p15 = Number(d.p_15m ?? 0.5);
+    return `<span class="muted">trend_score</span> · p_up <b>${pct(p)}</b> <span class="muted">(1m ${pct(p1,2)} · 5m ${pct(p5,2)} · 15m ${pct(p15,2)})</span>`;
+  }
+  if (label === 'llm_signal' || f.agent === 'llm_analyst'){
+    const posture = String(d.posture || '—').toUpperCase();
+    const conf = Number(d.confidence ?? 0);
+    const rationale = escapeHtml((d.rationale||'').trim());
+    const short = rationale.length > 220 ? rationale.slice(0,220)+"…" : rationale;
+    return `<span class="muted">llm</span> · <b>${posture}</b> @ ${pct(conf)} · <span title="${rationale}">${short}</span>`;
+  }
+  // default: compact pretty JSON
+  try {
+    return `<code class="json" title="raw details">${escapeHtml(JSON.stringify(d))}</code>`;
+  } catch { return `<code class="json">{}</code>`; }
+}
+
+function setupControls() {
+  const sel = byId('symbol');
+  sel.addEventListener('change', () => {
+    CURRENT = sel.value; localStorage.setItem('symbol', CURRENT);
+    byId('debugSymbol').lastElementChild.textContent = `symbol: ${CURRENT}`;
+    // clear charts on symbol switch for clarity
+    Object.values(charts).forEach(c => { c.data.labels = []; c.data.datasets[0].data = []; c.update(); });
+  });
+  byId('interval').addEventListener('change', (e)=>{
+    const v = Number(e.target.value)||5; POLL_MS = v*1000; restartPolling();
+  });
+  byId('runNow').addEventListener('click', async ()=>{
+    const names = ['rvol_spike','trend_score','llm_analyst'];
+    try { await j(`${BASE}/agents/run-now?names=${names.join(',')}&symbol=${encodeURIComponent(CURRENT)}&insert=true`);
+      byId('statusText').textContent = 'Agents ran.';
+    } catch(e) { byId('statusText').textContent = 'Run-now failed.'; }
+    await refreshFindings();
+  });
+  byId('exportCsv').addEventListener('click', exportCsv);
+  byId('debugSymbol').lastElementChild.textContent = `symbol: ${CURRENT}`;
+}
+
+async function exportCsv() {
+  const s = CURRENT; const F = await j(`${BASE}/findings?symbol=${encodeURIComponent(s)}&limit=500`);
+  const rows = [["ts_utc","agent","symbol","score","label","details"]]
+    .concat((F.findings||[]).map(f=>[
+      f.ts_utc||'', f.agent||'', f.symbol||s, String(f.score??''), f.label||'', JSON.stringify(f.details||{})
+    ]));
+  const csv = rows.map(r=> r.map(x=>`"${String(x).replaceAll('"','""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${s}-findings.csv`; a.click();
+}
+
+let timer = null;
+function restartPolling(){ if (timer) clearInterval(timer); timer = setInterval(tick, POLL_MS); }
+async function tick(){
+  await Promise.allSettled([refreshHealth(), refreshTiles(), refreshFindings()]);
+  byId('lastUpdate').textContent = new Date().toLocaleTimeString();
+}
+
+(async function init(){
+  setupControls();
+  await refreshHealth();
+  await tick();
+  restartPolling();
 })();
 </script>
 </body>
