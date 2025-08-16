@@ -13,6 +13,7 @@ except Exception:
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, List, Optional
 import asyncio, time, json, os
+from .db import db_health as db_status
 
 from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
@@ -84,13 +85,10 @@ async def health():
         "agents": agents_map,
     }
 
-@app.get("/db-health")
-async def db_health():
-    try:
-        await connect_async()
-        return {"ok": pg_conn is not None}
-    except Exception:
-        return {"ok": False, "error": "no_connection"}
+ @app.get("/db-health")
+ async def db_health_route():
+     # returns {"ok": True} or {"ok": False, "error": "..."}
+     return await db_status()
 
 @app.get("/signals")
 async def signals(symbol: str):
@@ -156,8 +154,3 @@ async def run_now(names: str, symbol: str, insert: bool = False):
         except Exception as e:
             out["results"].append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
     return out
-
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    p = os.path.join(os.path.dirname(__file__), "static", "index.html")
-    return HTMLResponse(open(p, "r", encoding="utf-8").read())
