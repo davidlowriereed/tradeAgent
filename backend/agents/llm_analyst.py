@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Optional
 from .base import Agent
 import os, json, re
+from ..db import heartbeat
 
 LLM_ENABLE = os.getenv("LLM_ENABLE", "false").lower() in ("1","true","yes")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini-2024-07-18")
@@ -31,7 +32,7 @@ class LLMAnalystAgent(Agent):
 
         posture, conf, rationale = "no_position", 0.5, "Neutral"
 
-        try:
+         try:
             from openai import OpenAI
             client = OpenAI()
 
@@ -43,7 +44,6 @@ class LLMAnalystAgent(Agent):
                 f"vwap_1m={tf.get('px_vs_vwap_bps_1m',0)} bps, "
                 f"rvol_1m={tf.get('rvol_1m',1.0)},\n"
                 f"trend_p_up={s.get('trend_p_up', 0.5)}.\n"
-                # JSON braces live in a *plain* string (no f-string), so no doubling needed:
                 "Recommend one of: LONG, SHORT, or FLAT. "
                 "Return JSON {\"posture\":\"...\",\"confidence\":0-1,\"rationale\":\"...\"}.\n"
             )
@@ -59,14 +59,17 @@ class LLMAnalystAgent(Agent):
             txt = rsp.choices[0].message.content or "{}"
             m = re.search(r"\{.*\}", txt, re.S)
             obj = json.loads(m.group(0) if m else "{}")
+
             posture_map = {"LONG": "long", "SHORT": "short", "FLAT": "no_position"}
             posture = posture_map.get(str(obj.get("posture", "")).upper(), "no_position")
             conf = float(obj.get("confidence", 0.5) or 0.5)
             rationale = (obj.get("rationale", "") or "N/A")[:RATIONALE_CHARS]
-        except Exception:
-            pass
 
-        if conf < MIN_CONF and score < MIN_SCORE:
+            # success: note a healthy heartbeat
+            await heartbeat(self.name, "ok")
+        except Exception as e:
+            # failure: record the error so /health and the dashboard can show it
+            await heartbeat(self.name, f"error: {type(e).__name__}")
             return None
 
         return {
