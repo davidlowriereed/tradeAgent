@@ -47,8 +47,10 @@ def list_agents_last_run() -> Dict[str, Dict[str, Optional[str]]]:
     return out
 
 async def agents_loop():
+    TICK_SEC = 5  # keep your current cadence; move to config later if you like
     while True:
         try:
+            # Ensure DB is warmed up (non-fatal if it fails)
             try:
                 if pg_conn is None:
                     await connect_async()
@@ -57,7 +59,7 @@ async def agents_loop():
 
             now = time.time()
 
-            # Update peaks
+            # Maintain posture peaks (unchanged)
             for sym in SYMBOLS:
                 ps = POSTURE_STATE.get(sym)
                 if ps and ps.get("status") == "long_bias":
@@ -68,33 +70,39 @@ async def agents_loop():
                         ps["peak_ts"] = now
                         POSTURE_STATE[sym] = ps
 
-            # Run agents
+            # Run agents on their own intervals (preserves your interval logic)
             for agent in AGENTS:
                 for sym in SYMBOLS:
                     key = (agent.name, sym)
                     interval = max(1, int(getattr(agent, "interval_sec", 10)))
                     if now - _last_run_ts[key] < interval:
                         continue
+
                     try:
-                        finding = await agent.run_once(sym)
+                        finding = await agent.run_once(sym)  # await the coroutine
                         _last_run_ts[key] = time.time()
-                        heartbeat(agent.name, "ok")
+
+                        # mark agent heartbeat as healthy for visibility in /health
+                        await heartbeat(agent.name, "ok")
+
                         if not finding:
                             continue
 
+                        # Optional guard for llm_analyst low scores (keep your behavior)
                         if agent.name == "llm_analyst" and float(finding.get("score", 0.0)) < float(LLM_ANALYST_MIN_SCORE):
                             continue
 
+                        # Prefer the positional signature (matches your /agents/run-now usage)
                         try:
-                            await insert_finding({
-                                "agent": agent.name,
-                                "symbol": sym,
-                                "score": float(finding.get("score", 0.0)),
-                                "label": finding.get("label", agent.name),
-                                "details": finding.get("details") or {},
-                            })
-
+                            await insert_finding(
+                                agent.name,
+                                sym,
+                                float(finding.get("score", 0.0)),
+                                finding.get("label", agent.name),
+                                finding.get("details") or {},
+                            )
                         except Exception:
+                            # Fallback to in-memory ring buffer if DB is unavailable
                             RECENT_FINDINGS.append({
                                 "agent": agent.name,
                                 "symbol": sym,
@@ -103,6 +111,7 @@ async def agents_loop():
                                 "details": finding.get("details") or {},
                             })
 
+                        # Preserve your trend_score posture-state logic
                         if agent.name == "trend_score":
                             p_up = float(finding.get("details", {}).get("p_up", 0.0))
                             ps = POSTURE_STATE.get(sym, {})
@@ -140,10 +149,13 @@ async def agents_loop():
                                     ps["_persist"] = max(0, cnt - 1)
                                     POSTURE_STATE[sym] = ps
 
-                    except Exception:
-                        heartbeat(agent.name, "error")
+                    except Exception as e:
+                        # record error heartbeat so the UI shows "error: <Type>"
+                        await heartbeat(agent.name, f"error: {type(e).__name__}")
                         continue
 
         except Exception:
+            # keep the outer loop resilient
             pass
-        await asyncio.sleep(5)
+
+        await asyncio.sleep(TICK_SEC)
