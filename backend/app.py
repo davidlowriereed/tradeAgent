@@ -18,7 +18,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health, connect_async, pg_conn
+from .db import db_health, connect_async, pg_conn, insert
 from .services.market import market_loop
 
 app = FastAPI(title="Opportunity Radar")
@@ -112,7 +112,14 @@ async def agents_run_now(names: str, symbol: str, insert: bool = True):
                     results.append({"agent": agent.name, "finding": finding})
                     if insert:
                         from .db import insert_finding
-                        insert_finding(agent.name, symbol, float(finding.get("score", 0.0)), finding.get("label", agent.name), finding.get("details") or {})
+                        await insert_finding({
+                           "agent": agent.name,
+                           "symbol": symbol,
+                           "score": float(finding.get("score", 0.0)),
+                           "label": finding.get("label", agent.name),
+                           "details": finding.get("details") or {},
+                        })
+
             except Exception as e:
                 results.append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
     return {"ok": True, "ran": ran, "results": results}
