@@ -331,7 +331,26 @@ function escapeHtml(s){
 }
 function pct(x,dp=1){ return Number.isFinite(x) ? (x*100).toFixed(dp)+"%" : "–"; }
 function formatDetails(f){
-  const d = f.details || {}; const label = f.label || f.agent;
+  let d = (f.details ?? {});
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch { /* keep as string */ } }
+  const label = f.label || f.agent;
+  if (label === 'trend_score'){
+    const p = Number(d.p_up ?? 0.5);
+    const p1 = Number(d.p_1m ?? 0.5), p5 = Number(d.p_5m ?? 0.5), p15 = Number(d.p_15m ?? 0.5);
+    return `<span class="muted">trend_score</span> · p_up <b>${pct(p)}</b> <span class="muted">(1m ${pct(p1,2)} · 5m ${pct(p5,2)} · 15m ${pct(p15,2)})</span>`;
+  }
+  if (label === 'llm_signal' || f.agent === 'llm_analyst'){
+    const posture = String(d.posture || '—').toUpperCase();
+    const conf = Number(d.confidence ?? 0);
+    const rationale = escapeHtml((d.rationale||'').trim());
+    const short = rationale.length > 220 ? rationale.slice(0,220)+"…" : rationale;
+    return `<span class="muted">llm</span> · <b>${posture}</b> @ ${pct(conf)} · <span title="${rationale}">${short}</span>`;
+  }
+  // default: compact pretty JSON
+  try {
+    return `<code class="json" title="raw details">${escapeHtml(typeof d === 'string' ? d : JSON.stringify(d))}</code>`;
+  } catch { return `<code class="json">{}</code>`; }
+}; const label = f.label || f.agent;
   if (label === 'trend_score'){
     const p = Number(d.p_up ?? 0.5);
     const p1 = Number(d.p_1m ?? 0.5), p5 = Number(d.p_5m ?? 0.5), p15 = Number(d.p_15m ?? 0.5);
