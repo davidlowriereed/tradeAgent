@@ -10,8 +10,9 @@ from .config import (
 )
 from .signals import compute_signals
 from .state import POSTURE_STATE, trades, RECENT_FINDINGS
-from .db import connect_async, insert_finding, heartbeat, pg_conn
 from .services.slack import should_post, post_webhook
+from .db import insert_finding, heartbeat
+from .state import RECENT_FINDINGS
 
 from .agents.base import Agent
 from .agents.rvol_spike import RVOLSpikeAgent
