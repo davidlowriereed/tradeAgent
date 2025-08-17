@@ -25,14 +25,22 @@ app = FastAPI(title="Opportunity Radar")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 @app.get("/debug/env")
-async def debug_env():
+ async def debug_env():
     def present(name): return bool(os.getenv(name))
-    return {
+    def present_len(name):
+        v = os.getenv(name)
+        return len(v) if v else 0
+     return {
         "LLM_ENABLE": os.getenv("LLM_ENABLE"),
         "OPENAI_MODEL": os.getenv("OPENAI_MODEL"),
         "OPENAI_API_KEY_present": present("OPENAI_API_KEY"),
         "LLM_ANALYST_ENABLED": os.getenv("LLM_ANALYST_ENABLED"),
-    }
+        "DATABASE_URL_present": present("DATABASE_URL"),
+        "DATABASE_CA_CERT_present": present("DATABASE_CA_CERT"),
+        "DATABASE_CA_CERT_len": present_len("DATABASE_CA_CERT"),
+        "DATABASE_CA_CERT_B64_present": present("DATABASE_CA_CERT_B64"),
+        "DB_TLS_INSECURE": os.getenv("DB_TLS_INSECURE"),
+     }
 
 @app.get("/debug/llm")
 async def debug_llm(symbol: str = "BTC-USD"):
