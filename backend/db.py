@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio, json, os, ssl
 from typing import Optional, Any, Dict
 from datetime import datetime, timezone
-
 from .config import DATABASE_URL
+import ssl
+
 from .state import RECENT_FINDINGS
 
 # ----- heartbeat (used by /health) -----
@@ -24,13 +25,25 @@ async def connect_pool():
         return POOL
     import asyncpg
     try:
-        # DO requires TLS on 25060; bool True is enough (no cert bundle needed)
+        # Prefer a verifying SSLContext using the DO-provided CA (DATABASE_CA_CERT).
+        ca_pem = os.getenv("DATABASE_CA_CERT")
+        ssl_opt: "ssl.SSLContext | bool"
+        if ca_pem:
+            ctx = ssl.create_default_context()
+            # load_verify_locations supports PEM string via cadata
+            ctx.load_verify_locations(cadata=ca_pem)
+            ssl_opt = ctx
+        else:
+            # Fallback: encrypted but non-verifying (≈ sslmode=require). Securely attach your DB so DATABASE_CA_CERT appears.
+            ssl_opt = True
+
         POOL = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=1, max_size=5,
-            ssl=True,                 # <— important (was "require" string before)
+            ssl=ssl_opt,
             command_timeout=10,
         )
+        
         _last_db_error = None
         return POOL
     except Exception as e:
