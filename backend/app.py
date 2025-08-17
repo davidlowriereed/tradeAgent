@@ -17,6 +17,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
+from .db import fetch_recent_findings
 from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding
 from .services.market import market_loop
 
@@ -95,20 +96,14 @@ async def signals_tf(symbol: str):
 
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
+    rows = await fetch_recent_findings(symbol, limit)
+    if rows and "ts_utc" in rows[0]:
+        return {"findings": rows}
+    # fallback to legacy in-mem shape if DB down/empty
     out = []
     for f in list(RECENT_FINDINGS)[-limit:][::-1]:
-        if symbol and f.get("symbol") != symbol:
-            continue
-        out.append({
-            "ts_utc": None,
-            "agent": f.get("agent"),
-            "symbol": f.get("symbol"),
-            "score": f.get("score"),
-            "label": f.get("label"),
-            "details": f.get("details") or {},
-        })
-        if len(out) >= limit:
-            break
+        if symbol and f.get("symbol") != symbol: continue
+        out.append({"ts_utc": None, **f})
     return {"findings": out}
 
 @app.get("/agents")
