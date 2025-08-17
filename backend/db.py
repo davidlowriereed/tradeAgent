@@ -98,6 +98,24 @@ async def db_health() -> Dict[str, Any]:
         _last_db_error = f"{type(e).__name__}: {e}"
         return {"ok": False, "error": _last_db_error}
 
+async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
+    pool = await connect_pool()
+    if not pool:
+        return list(RECENT_FINDINGS)[-limit:][::-1]
+    q = """
+      SELECT ts_utc, agent, symbol, score, label, details
+      FROM findings
+      {where}
+      ORDER BY ts_utc DESC
+      LIMIT $1
+    """
+    where = "WHERE symbol = $2" if symbol else ""
+    async with pool.acquire() as conn:
+        rows = await (conn.fetch(q.format(where=where), limit, symbol) if symbol
+                      else conn.fetch(q.format(where=""), limit))
+    return [dict(r) for r in rows]
+
+
 async def insert_finding(row: Dict[str, Any]) -> None:
     """Best-effort insert; falls back to in-mem ring buffer if DB is down."""
     try:
