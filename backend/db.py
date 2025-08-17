@@ -3,47 +3,50 @@ from __future__ import annotations
 import asyncio, json, os, ssl
 from typing import Optional, Any, Dict
 from datetime import datetime, timezone
-from .config import DATABASE_URL
-import ssl
 
+from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
 
-# ----- heartbeat (used by /health) -----
 HEARTBEATS: dict[str, dict] = {}
 async def heartbeat(name: str, status: str = "ok") -> None:
     HEARTBEATS[name] = {"status": status, "last_run": datetime.now(timezone.utc).isoformat()}
-heartbeats = HEARTBEATS  # compat alias
+heartbeats = HEARTBEATS  # compat
 
-# ----- pool + error state -----
 POOL: Optional["asyncpg.pool.Pool"] = None
 _last_db_error: Optional[str] = None
 
+async def _make_pool(ssl_opt):
+    import asyncpg
+    return await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1, max_size=5,
+        ssl=ssl_opt,
+        command_timeout=10,
+    )
+
 async def connect_pool():
-    """Create a tiny asyncpg pool with TLS. Safe to call repeatedly."""
+    """Create an asyncpg pool with TLS. Try verify-with-CA first, then retry with ssl=True."""
     global POOL, _last_db_error
     if POOL is not None:
         return POOL
     import asyncpg
     try:
-        # Prefer a verifying SSLContext using the DO-provided CA (DATABASE_CA_CERT).
-        ca_pem = os.getenv("DATABASE_CA_CERT")
-        ssl_opt: "ssl.SSLContext | bool"
+        ca_pem = os.getenv("DATABASE_CA_CERT")  # set automatically when you 'Attach Database' in DO
         if ca_pem:
             ctx = ssl.create_default_context()
-            # load_verify_locations supports PEM string via cadata
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            # feed PEM directly from env
             ctx.load_verify_locations(cadata=ca_pem)
-            ssl_opt = ctx
-        else:
-            # Fallback: encrypted but non-verifying (≈ sslmode=require). Securely attach your DB so DATABASE_CA_CERT appears.
-            ssl_opt = True
-
-        POOL = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=1, max_size=5,
-            ssl=ssl_opt,
-            command_timeout=10,
-        )
-        
+            try:
+                POOL = await _make_pool(ctx)        # verify using CA
+                _last_db_error = None
+                return POOL
+            except ssl.SSLCertVerificationError as e:
+                # fall through to non-verifying encrypted connection
+                _last_db_error = f"{type(e).__name__}: {e} (retrying with ssl=True)"
+        # Either CA not present or verify failed → encrypted/no-verify (≈ sslmode=require)
+        POOL = await _make_pool(True)
         _last_db_error = None
         return POOL
     except Exception as e:
@@ -52,7 +55,6 @@ async def connect_pool():
         return None
 
 async def ensure_schema():
-    """Create tables if missing (idempotent)."""
     pool = await connect_pool()
     if not pool:
         return
@@ -85,7 +87,6 @@ async def ensure_schema():
             await conn.execute(s)
 
 async def db_health() -> Dict[str, Any]:
-    """Health with error detail for easier debugging."""
     global _last_db_error
     try:
         pool = await connect_pool()
@@ -98,26 +99,7 @@ async def db_health() -> Dict[str, Any]:
         _last_db_error = f"{type(e).__name__}: {e}"
         return {"ok": False, "error": _last_db_error}
 
-async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
-    pool = await connect_pool()
-    if not pool:
-        return list(RECENT_FINDINGS)[-limit:][::-1]
-    q = """
-      SELECT ts_utc, agent, symbol, score, label, details
-      FROM findings
-      {where}
-      ORDER BY ts_utc DESC
-      LIMIT $1
-    """
-    where = "WHERE symbol = $2" if symbol else ""
-    async with pool.acquire() as conn:
-        rows = await (conn.fetch(q.format(where=where), limit, symbol) if symbol
-                      else conn.fetch(q.format(where=""), limit))
-    return [dict(r) for r in rows]
-
-
 async def insert_finding(row: Dict[str, Any]) -> None:
-    """Best-effort insert; falls back to in-mem ring buffer if DB is down."""
     try:
         pool = await connect_pool()
         if not pool:
@@ -135,4 +117,23 @@ async def insert_finding(row: Dict[str, Any]) -> None:
                 json.dumps(row.get("details") or {}),
             )
     except Exception:
+        # keep your graceful fallback
         RECENT_FINDINGS.appendleft(row)
+
+async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
+    """Return newest rows from DB when available; else fall back to in-mem buffer."""
+    pool = await connect_pool()
+    if not pool:
+        return list(RECENT_FINDINGS)[-limit:][::-1]
+    where = "WHERE symbol = $2" if symbol else ""
+    sql = f"""
+      SELECT ts_utc, agent, symbol, score, label, details
+      FROM findings
+      {where}
+      ORDER BY ts_utc DESC
+      LIMIT $1
+    """
+    async with pool.acquire() as conn:
+        rows = await (conn.fetch(sql, limit, symbol) if symbol else conn.fetch(sql, limit))
+    # asyncpg Record → dict
+    return [dict(r) for r in rows]
