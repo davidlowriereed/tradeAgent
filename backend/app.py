@@ -1,6 +1,7 @@
+# backend/app.py
 from __future__ import annotations
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 try:
     from fastapi.responses import ORJSONResponse  # type: ignore
@@ -10,27 +11,34 @@ except Exception:
     default_resp = JSONResponse
 
 from fastapi.staticfiles import StaticFiles
-from typing import Dict, Any, List, Optional
-import asyncio, time, json, os
+from typing import Optional
+import asyncio, os
+import inspect  # for maybe_await
+import json
+import time
 
 from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import fetch_recent_findings
 from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding, fetch_recent_findings
 from .services.market import market_loop
 
-app = FastAPI(title="Opportunity Radar")
+# helper: works whether a function is sync or async
+async def _maybe_await(x):
+    return await x if inspect.isawaitable(x) else x
+
+app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 @app.get("/debug/env")
- async def debug_env():
-    def present(name): return bool(os.getenv(name))
-    def present_len(name):
+async def debug_env():
+    def present(name: str) -> bool:
+        return bool(os.getenv(name))
+    def present_len(name: str) -> int:
         v = os.getenv(name)
         return len(v) if v else 0
-     return {
+    return {
         "LLM_ENABLE": os.getenv("LLM_ENABLE"),
         "OPENAI_MODEL": os.getenv("OPENAI_MODEL"),
         "OPENAI_API_KEY_present": present("OPENAI_API_KEY"),
@@ -40,7 +48,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
         "DATABASE_CA_CERT_len": present_len("DATABASE_CA_CERT"),
         "DATABASE_CA_CERT_B64_present": present("DATABASE_CA_CERT_B64"),
         "DB_TLS_INSECURE": os.getenv("DB_TLS_INSECURE"),
-     }
+    }
 
 @app.get("/debug/llm")
 async def debug_llm(symbol: str = "BTC-USD"):
@@ -48,8 +56,8 @@ async def debug_llm(symbol: str = "BTC-USD"):
         from openai import OpenAI
         client = OpenAI()
         rsp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
-            messages=[{"role":"user","content":f"ping for {symbol}. Reply with {{\"pong\":true}}"}],
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": f'ping for {symbol}. Reply with {{"pong": true}}'}],
             temperature=0, max_tokens=10,
         )
         return {"ok": True, "model": rsp.model, "first": rsp.choices[0].message.content}
@@ -58,8 +66,9 @@ async def debug_llm(symbol: str = "BTC-USD"):
 
 @app.on_event("startup")
 async def _startup():
-    await connect_pool()
-    await ensure_schema()
+    # tolerate either sync or async db helpers
+    await _maybe_await(connect_pool())
+    await _maybe_await(ensure_schema())
     asyncio.create_task(agents_loop())
     asyncio.create_task(market_loop())
 
@@ -87,8 +96,13 @@ async def health():
 
 @app.get("/db-health")
 async def db_health_route():
-    # returns {"ok": True} or {"ok": False, "error": "..."}
-    return await db_status()
+    # db_status may be sync or async in your codebase
+    try:
+        res = await _maybe_await(db_status())
+        # allow either {"ok": ...} or bare bool
+        return res if isinstance(res, dict) else {"ok": bool(res)}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 @app.get("/signals")
 async def signals(symbol: str):
@@ -100,17 +114,20 @@ async def signals(symbol: str):
 async def signals_tf(symbol: str):
     if symbol not in SYMBOLS:
         raise HTTPException(400, f"unknown symbol: {symbol}")
-    return compute_signals_tf(symbol)
+    # compute_signals_tf is async elsewhere in your code, so await it here
+    return await compute_signals_tf(symbol)
 
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
-    rows = await fetch_recent_findings(symbol, limit)
-    if rows and "ts_utc" in rows[0]:
+    # tolerate sync/async fetch_recent_findings
+    rows = await _maybe_await(fetch_recent_findings(symbol, limit))
+    if rows and isinstance(rows, list) and isinstance(rows[0], dict) and "ts_utc" in rows[0]:
         return {"findings": rows}
     # fallback to legacy in-mem shape
     out = []
     for f in list(RECENT_FINDINGS)[-limit:][::-1]:
-        if symbol and f.get("symbol") != symbol: continue
+        if symbol and f.get("symbol") != symbol:
+            continue
         out.append({"ts_utc": None, **f})
     return {"findings": out}
 
@@ -132,13 +149,16 @@ async def run_now(names: str, symbol: str, insert: bool = False):
         try:
             finding = await agent.run_once(symbol)
             if finding and insert:
-                await insert_finding({
-                    "agent": agent.name,
-                    "symbol": symbol,
-                    "score": float(finding.get("score", 0.0)),
-                    "label": finding.get("label", agent.name),
-                    "details": finding.get("details") or {},
-                })
+                # prefer positional signature; tolerate sync/async
+                await _maybe_await(
+                    insert_finding(
+                        agent.name,
+                        symbol,
+                        float(finding.get("score", 0.0)),
+                        finding.get("label", agent.name),
+                        finding.get("details") or {},
+                    )
+                )
             out["ran"].append(agent.name)
             out["results"].append(
                 {"agent": agent.name, "finding": finding} if finding
