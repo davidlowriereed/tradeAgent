@@ -1,19 +1,40 @@
 # backend/db.py
 from __future__ import annotations
-import asyncio, json, os, ssl
+import asyncio, json, os, ssl, base64
 from typing import Optional, Any, Dict
 from datetime import datetime, timezone
 
 from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
 
+# ----- heartbeat (used by /health) -----
 HEARTBEATS: dict[str, dict] = {}
 async def heartbeat(name: str, status: str = "ok") -> None:
     HEARTBEATS[name] = {"status": status, "last_run": datetime.now(timezone.utc).isoformat()}
-heartbeats = HEARTBEATS  # compat
+heartbeats = HEARTBEATS  # compat alias
 
+# ----- pool + error state -----
 POOL: Optional["asyncpg.pool.Pool"] = None
 _last_db_error: Optional[str] = None
+_tls_mode: str = "unknown"  # "verify-ca" | "require" | "insecure"
+
+
+def _build_ssl_context_from_env() -> Optional[ssl.SSLContext]:
+    """Return a verifying SSLContext if a CA is provided via env."""
+    ca_pem = os.getenv("DATABASE_CA_CERT")
+    ca_b64 = os.getenv("DATABASE_CA_CERT_B64")
+    if not ca_pem and ca_b64:
+        try:
+            ca_pem = base64.b64decode(ca_b64).decode("utf-8")
+        except Exception:
+            ca_pem = None
+    if not ca_pem:
+        return None
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(cadata=ca_pem)
+    return ctx
 
 async def _make_pool(ssl_opt):
     import asyncpg
@@ -25,30 +46,35 @@ async def _make_pool(ssl_opt):
     )
 
 async def connect_pool():
-    """Create an asyncpg pool with TLS. Try verify-with-CA first, then retry with ssl=True."""
-    global POOL, _last_db_error
+    """Create asyncpg pool with best-effort TLS. Safe to call repeatedly."""
+    global POOL, _last_db_error, _tls_mode
     if POOL is not None:
         return POOL
-    import asyncpg
     try:
-        ca_pem = os.getenv("DATABASE_CA_CERT")  # set automatically when you 'Attach Database' in DO
-        if ca_pem:
+        # 0) explicit insecure override (debug only)
+        if os.getenv("DB_TLS_INSECURE", "").lower() in ("1", "true", "yes"):
             ctx = ssl.create_default_context()
-            ctx.check_hostname = True
-            ctx.verify_mode = ssl.CERT_REQUIRED
-            # feed PEM directly from env
-            ctx.load_verify_locations(cadata=ca_pem)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            POOL = await _make_pool(ctx)
+            _tls_mode, _last_db_error = "insecure", None
+            return POOL
+
+        # 1) verify-ca if CA provided
+        ctx = _build_ssl_context_from_env()
+        if ctx:
             try:
-                POOL = await _make_pool(ctx)        # verify using CA
-                _last_db_error = None
+                POOL = await _make_pool(ctx)
+                _tls_mode, _last_db_error = "verify-ca", None
                 return POOL
             except ssl.SSLCertVerificationError as e:
-                # fall through to non-verifying encrypted connection
-                _last_db_error = f"{type(e).__name__}: {e} (retrying with ssl=True)"
-        # Either CA not present or verify failed → encrypted/no-verify (≈ sslmode=require)
+                _last_db_error = f"{type(e).__name__}: {e}"
+
+        # 2) fallback: encrypted/no-verify (≈ sslmode=require)
         POOL = await _make_pool(True)
-        _last_db_error = None
+        _tls_mode, _last_db_error = "require", None
         return POOL
+
     except Exception as e:
         _last_db_error = f"{type(e).__name__}: {e}"
         POOL = None
@@ -87,17 +113,19 @@ async def ensure_schema():
             await conn.execute(s)
 
 async def db_health() -> Dict[str, Any]:
-    global _last_db_error
+    """Health with error detail and TLS mode for easier debugging."""
+    global _last_db_error, _tls_mode
     try:
         pool = await connect_pool()
         if not pool:
-            return {"ok": False, "error": _last_db_error or "no pool"}
+            return {"ok": False, "mode": _tls_mode, "error": _last_db_error or "no pool"}
         async with pool.acquire() as conn:
             await conn.execute("SELECT 1;")
-        return {"ok": True}
+        return {"ok": True, "mode": _tls_mode}
     except Exception as e:
         _last_db_error = f"{type(e).__name__}: {e}"
-        return {"ok": False, "error": _last_db_error}
+        return {"ok": False, "mode": _tls_mode, "error": _last_db_error}
+
 
 async def insert_finding(row: Dict[str, Any]) -> None:
     try:
