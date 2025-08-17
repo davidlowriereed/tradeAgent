@@ -115,7 +115,7 @@ async def signals_tf(symbol: str):
     if symbol not in SYMBOLS:
         raise HTTPException(400, f"unknown symbol: {symbol}")
     # compute_signals_tf is async elsewhere in your code, so await it here
-    return await compute_signals_tf(symbol)
+    return compute_signals_tf(symbol)
 
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
