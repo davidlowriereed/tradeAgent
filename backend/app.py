@@ -17,7 +17,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health as db_status, connect_pool, ensure_schema
+from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding
 from .services.market import market_loop
 
 app = FastAPI(title="Opportunity Radar")
