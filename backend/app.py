@@ -18,7 +18,7 @@ from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
 from .db import fetch_recent_findings
-from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding
+from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding, fetch_recent_findings
 from .services.market import market_loop
 
 app = FastAPI(title="Opportunity Radar")
@@ -99,7 +99,7 @@ async def findings(symbol: Optional[str] = None, limit: int = 20):
     rows = await fetch_recent_findings(symbol, limit)
     if rows and "ts_utc" in rows[0]:
         return {"findings": rows}
-    # fallback to legacy in-mem shape if DB down/empty
+    # fallback to legacy in-mem shape
     out = []
     for f in list(RECENT_FINDINGS)[-limit:][::-1]:
         if symbol and f.get("symbol") != symbol: continue
