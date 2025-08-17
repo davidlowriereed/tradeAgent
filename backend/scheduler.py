@@ -51,13 +51,7 @@ async def agents_loop():
     TICK_SEC = 5  # keep your current cadence; move to config later if you like
     while True:
         try:
-            # Ensure DB is warmed up (non-fatal if it fails)
-            try:
-                if pg_conn is None:
-                    await connect_async()
-            except Exception:
-                pass
-
+            
             now = time.time()
 
             # Maintain posture peaks (unchanged)
@@ -95,7 +89,7 @@ async def agents_loop():
 
                         # Prefer the positional signature (matches your /agents/run-now usage)
                         try:
-                            await insert_finding({
+                            insert_finding({
                                 "agent": agent.name,
                                 "symbol": sym,
                                 "score": float(finding.get("score", 0.0)),
