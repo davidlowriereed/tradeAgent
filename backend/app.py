@@ -1,4 +1,3 @@
-# backend/app.py
 from __future__ import annotations
 
 from fastapi import FastAPI, Request, HTTPException
@@ -13,21 +12,16 @@ except Exception:
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, List, Optional
 import asyncio, time, json, os
-from .db import db_health as db_status
 
 from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health, connect_pool, ensure_schema
+from .db import db_health as db_status, connect_pool, ensure_schema
 from .services.market import market_loop
 
 app = FastAPI(title="Opportunity Radar")
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
-
-# at top
-import os
-from fastapi import HTTPException
 
 @app.get("/debug/env")
 async def debug_env():
@@ -51,15 +45,12 @@ async def debug_llm(symbol: str = "BTC-USD"):
         )
         return {"ok": True, "model": rsp.model, "first": rsp.choices[0].message.content}
     except Exception as e:
-        # Surface exact error to unblock (auth/model/network)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.on_event("startup")
 async def _startup():
-    import asyncio
-    await connect_pool()    # establish TLS pool
-    await ensure_schema()   # create tables if needed
+    await connect_pool()
+    await ensure_schema()
     asyncio.create_task(agents_loop())
     asyncio.create_task(market_loop())
 
@@ -85,10 +76,10 @@ async def health():
         "agents": agents_map,
     }
 
- @app.get("/db-health")
- async def db_health_route():
-     # returns {"ok": True} or {"ok": False, "error": "..."}
-     return await db_status()
+@app.get("/db-health")
+async def db_health_route():
+    # returns {"ok": True} or {"ok": False, "error": "..."}
+    return await db_status()
 
 @app.get("/signals")
 async def signals(symbol: str):
@@ -105,7 +96,6 @@ async def signals_tf(symbol: str):
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
     out = []
-    # Try in-memory buffer first (DB wiring is optional here)
     for f in list(RECENT_FINDINGS)[-limit:][::-1]:
         if symbol and f.get("symbol") != symbol:
             continue
@@ -137,9 +127,9 @@ async def run_now(names: str, symbol: str, insert: bool = False):
             out["results"].append({"agent": name, "error": "unknown agent"})
             continue
         try:
-            finding = await agent.run_once(symbol)          # <-- await the coroutine
+            finding = await agent.run_once(symbol)
             if finding and insert:
-                await insert_finding({                      # <-- await the DB insert (coroutine)
+                await insert_finding({
                     "agent": agent.name,
                     "symbol": symbol,
                     "score": float(finding.get("score", 0.0)),
