@@ -1,4 +1,3 @@
-
 import time, asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -12,7 +11,6 @@ from .signals import compute_signals
 from .state import POSTURE_STATE, trades, RECENT_FINDINGS
 from .services.slack import should_post, post_webhook
 from .db import insert_finding, heartbeat
-from .state import RECENT_FINDINGS
 
 from .agents.base import Agent
 from .agents.rvol_spike import RVOLSpikeAgent
@@ -48,10 +46,9 @@ def list_agents_last_run() -> Dict[str, Dict[str, Optional[str]]]:
     return out
 
 async def agents_loop():
-    TICK_SEC = 5  # keep your current cadence; move to config later if you like
+    TICK_SEC = 5
     while True:
         try:
-            
             now = time.time()
 
             # Maintain posture peaks (unchanged)
@@ -65,7 +62,7 @@ async def agents_loop():
                         ps["peak_ts"] = now
                         POSTURE_STATE[sym] = ps
 
-            # Run agents on their own intervals (preserves your interval logic)
+            # Run agents on their own intervals
             for agent in AGENTS:
                 for sym in SYMBOLS:
                     key = (agent.name, sym)
@@ -74,22 +71,20 @@ async def agents_loop():
                         continue
 
                     try:
-                        finding = await agent.run_once(sym)  # await the coroutine
+                        finding = await agent.run_once(sym)
                         _last_run_ts[key] = time.time()
 
-                        # mark agent heartbeat as healthy for visibility in /health
                         await heartbeat(agent.name, "ok")
 
                         if not finding:
                             continue
 
-                        # Optional guard for llm_analyst low scores (keep your behavior)
                         if agent.name == "llm_analyst" and float(finding.get("score", 0.0)) < float(LLM_ANALYST_MIN_SCORE):
                             continue
 
-                        # Prefer the positional signature (matches your /agents/run-now usage)
+                        # ✅ await the async insert; pass a dict body
                         try:
-                            insert_finding({
+                            await insert_finding({
                                 "agent": agent.name,
                                 "symbol": sym,
                                 "score": float(finding.get("score", 0.0)),
@@ -97,8 +92,7 @@ async def agents_loop():
                                 "details": finding.get("details") or {},
                             })
                         except Exception:
-                                            
-                            # Fallback to in-memory ring buffer if DB is unavailable
+                            # In-mem fallback
                             RECENT_FINDINGS.append({
                                 "agent": agent.name,
                                 "symbol": sym,
@@ -146,12 +140,9 @@ async def agents_loop():
                                     POSTURE_STATE[sym] = ps
 
                     except Exception as e:
-                        # record error heartbeat so the UI shows "error: <Type>"
                         await heartbeat(agent.name, f"error: {type(e).__name__}")
                         continue
-
         except Exception:
-            # keep the outer loop resilient
             pass
 
         await asyncio.sleep(TICK_SEC)
