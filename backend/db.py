@@ -1,8 +1,9 @@
 # backend/db.py
 from __future__ import annotations
 import asyncio, json, os, ssl, base64
-from typing import Any, Dict, Optional
+from typing import Optional, Any, Dict
 from datetime import datetime, timezone
+import json
 
 from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
@@ -122,67 +123,6 @@ async def ensure_schema():
     async with pool.acquire() as conn:
         for s in stmts:
             await conn.execute(s)
-        await conn.execute("""
-    CREATE TABLE IF NOT EXISTS bars_1m (
-      symbol   text NOT NULL,
-      ts_utc   timestamptz NOT NULL,
-      o        numeric NOT NULL,
-      h        numeric NOT NULL,
-      l        numeric NOT NULL,
-      c        numeric NOT NULL,
-      v        numeric NOT NULL,
-      vwap     numeric,
-      trades   integer,
-      PRIMARY KEY (symbol, ts_utc)
-    );
-    CREATE INDEX IF NOT EXISTS bars_1m_symbol_ts ON bars_1m(symbol, ts_utc);
-
-    CREATE TABLE IF NOT EXISTS features_1m (
-      symbol   text NOT NULL,
-      ts_utc   timestamptz NOT NULL,
-      mom_bps_1m  numeric,
-      mom_bps_5m  numeric,
-      mom_bps_15m numeric,
-      px_vs_vwap_bps_1m  numeric,
-      px_vs_vwap_bps_5m  numeric,
-      px_vs_vwap_bps_15m numeric,
-      rvol_1m   numeric,
-      rvol_5m   numeric,
-      rvol_15m  numeric,
-      atr_1m    numeric,
-      atr_5m    numeric,
-      atr_15m   numeric,
-      schema_version integer NOT NULL DEFAULT 1,
-      PRIMARY KEY (symbol, ts_utc)
-    );
-    CREATE INDEX IF NOT EXISTS features_1m_symbol_ts ON features_1m(symbol, ts_utc);
-    """)
-
-        # Forward return materialized views (safe to (re)create)
-        await conn.execute("""
-    CREATE MATERIALIZED VIEW IF NOT EXISTS labels_ret_5m AS
-    SELECT b.symbol, b.ts_utc,
-           LEAD(b.c, 5) OVER (PARTITION BY b.symbol ORDER BY b.ts_utc) AS c_fwd,
-           b.c AS c_now
-    FROM bars_1m b;
-
-    CREATE MATERIALIZED VIEW IF NOT EXISTS labels_ret_15m AS
-    SELECT b.symbol, b.ts_utc,
-           LEAD(b.c, 15) OVER (PARTITION BY b.symbol ORDER BY b.ts_utc) AS c_fwd,
-           b.c AS c_now
-    FROM bars_1m b;
-
-    -- convenience views with returns (ignore null forwards)
-    CREATE OR REPLACE VIEW ret_5m AS
-    SELECT symbol, ts_utc, (c_fwd / NULLIF(c_now,0) - 1.0) AS ret
-    FROM labels_ret_5m WHERE c_fwd IS NOT NULL;
-
-    CREATE OR REPLACE VIEW ret_15m AS
-    SELECT symbol, ts_utc, (c_fwd / NULLIF(c_now,0) - 1.0) AS ret
-    FROM labels_ret_15m WHERE c_fwd IS NOT NULL;
-    """)
-
-
 async def db_health() -> Dict[str, Any]:
     """Health with error detail and TLS mode for easier debugging."""
     global _last_db_error, _tls_mode
@@ -250,59 +190,25 @@ async def db_supervisor_loop(interval_sec: int = 30):
         await asyncio.sleep(interval_sec)
 
 
-async def insert_bar_1m(symbol: str, ts_utc: str, bar: Dict[str, Any]) -> None:
-    """Upsert a 1m bar."""
+async def insert_finding(symbol: str, agent: str, score: float, label: str, details: dict, ts_utc: str | None = None):
     pool = await connect_pool()
     if not pool:
-        return
+        # in-memory fallback
+        RECENT_FINDINGS.append({
+            "ts_utc": ts_utc, "agent": agent, "symbol": symbol,
+            "score": score, "label": label, "details": details
+        })
+        return False
     async with pool.acquire() as conn:
         await conn.execute("""
-        INSERT INTO bars_1m(symbol, ts_utc, o,h,l,c,v,vwap,trades)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        ON CONFLICT(symbol, ts_utc) DO UPDATE SET
-          o=EXCLUDED.o, h=EXCLUDED.h, l=EXCLUDED.l, c=EXCLUDED.c,
-          v=EXCLUDED.v, vwap=EXCLUDED.vwap, trades=EXCLUDED.trades
-        """, symbol, ts_utc,
-           bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"),
-           bar.get("v"), bar.get("vwap"), bar.get("trades"))
+        INSERT INTO findings(ts_utc, agent, symbol, score, label, details)
+        VALUES(COALESCE($1, NOW()), $2, $3, $4, $5, $6)
+        """, ts_utc, agent, symbol, float(score), label, json.dumps(details))
+    return True
 
+async def insert_finding_row(row: dict):
+    return await insert_finding(
+        row.get("symbol",""), row.get("agent",""), float(row.get("score",0.0)),
+        row.get("label",""), row.get("details",{}), row.get("ts_utc")
+    )
 
-
-async def insert_features_1m(symbol: str, ts_utc: str, fx: Dict[str, Any], schema_version: int = 1) -> None:
-    """Upsert a 1m feature vector."""
-    pool = await connect_pool()
-    if not pool:
-        return
-    async with pool.acquire() as conn:
-        await conn.execute("""
-        INSERT INTO features_1m(symbol, ts_utc,
-          mom_bps_1m, mom_bps_5m, mom_bps_15m,
-          px_vs_vwap_bps_1m, px_vs_vwap_bps_5m, px_vs_vwap_bps_15m,
-          rvol_1m, rvol_5m, rvol_15m,
-          atr_1m, atr_5m, atr_15m, schema_version)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-        ON CONFLICT(symbol, ts_utc) DO UPDATE SET
-          mom_bps_1m=EXCLUDED.mom_bps_1m,
-          mom_bps_5m=EXCLUDED.mom_bps_5m,
-          mom_bps_15m=EXCLUDED.mom_bps_15m,
-          px_vs_vwap_bps_1m=EXCLUDED.px_vs_vwap_bps_1m,
-          px_vs_vwap_bps_5m=EXCLUDED.px_vs_vwap_bps_5m,
-          px_vs_vwap_bps_15m=EXCLUDED.px_vs_vwap_bps_15m,
-          rvol_1m=EXCLUDED.rvol_1m, rvol_5m=EXCLUDED.rvol_5m, rvol_15m=EXCLUDED.rvol_15m,
-          atr_1m=EXCLUDED.atr_1m, atr_5m=EXCLUDED.atr_5m, atr_15m=EXCLUDED.atr_15m,
-          schema_version=EXCLUDED.schema_version
-        """, symbol, ts_utc,
-           fx.get("mom_bps_1m"), fx.get("mom_bps_5m"), fx.get("mom_bps_15m"),
-           fx.get("px_vs_vwap_bps_1m"), fx.get("px_vs_vwap_bps_5m"), fx.get("px_vs_vwap_bps_15m"),
-           fx.get("rvol_1m"), fx.get("rvol_5m"), fx.get("rvol_15m"),
-           fx.get("atr_1m"), fx.get("atr_5m"), fx.get("atr_15m"),
-           schema_version)
-
-
-async def refresh_return_views():
-    pool = await connect_pool()
-    if not pool:
-        return
-    async with pool.acquire() as conn:
-        await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY labels_ret_5m;")
-        await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY labels_ret_15m;")
