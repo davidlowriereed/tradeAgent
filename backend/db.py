@@ -207,26 +207,35 @@ async def insert_bar_1m(symbol: str, ts_utc, o, h, l, c, v, vwap=None, trades=No
             """
             INSERT INTO bars_1m(symbol, ts_utc, o,h,l,c,v,vwap,trades)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (symbol, ts_utc) DO UPDATE SET
-              o=EXCLUDED.o, h=EXCLUDED.h, l=EXCLUDED.l, c=EXCLUDED.c,
-              v=EXCLUDED.v, vwap=EXCLUDED.vwap, trades=EXCLUDED.trades
+            ON CONFLICT (symbol, ts_utc) DO NOTHING
             """,
             symbol, ts_utc, o, h, l, c, v, vwap, trades
         )
     return True
 
 
-async def insert_features_1m(
-    symbol: str, ts_utc,
-    mom_bps_1m=None, mom_bps_5m=None, mom_bps_15m=None,
-    px_vs_vwap_bps_1m=None, px_vs_vwap_bps_5m=None, px_vs_vwap_bps_15m=None,
-    rvol_1m=None, rvol_5m=None, rvol_15m=None,
-    atr_1m=None, atr_5m=None, atr_15m=None,
-    schema_version: int = 1
-) -> bool:
+
+async def insert_features_1m(symbol: str, ts_utc, *args, schema_version: int = 1) -> bool:
     """
     Upsert a 1m feature row aligned to the bar timestamp.
+    Accepts either a single dict of features as the next arg, or the explicit numeric fields.
     """
+    # Normalize inputs
+    if len(args) == 1 and isinstance(args[0], dict):
+        feat = args[0]
+        mom_bps_1m = feat.get("mom_bps_1m"); mom_bps_5m = feat.get("mom_bps_5m"); mom_bps_15m = feat.get("mom_bps_15m")
+        px_vs_vwap_bps_1m = feat.get("px_vs_vwap_bps_1m"); px_vs_vwap_bps_5m = feat.get("px_vs_vwap_bps_5m"); px_vs_vwap_bps_15m = feat.get("px_vs_vwap_bps_15m")
+        rvol_1m = feat.get("rvol_1m"); rvol_5m = feat.get("rvol_5m"); rvol_15m = feat.get("rvol_15m")
+        atr_1m = feat.get("atr_1m"); atr_5m = feat.get("atr_5m"); atr_15m = feat.get("atr_15m")
+    else:
+        # Expect the 12 numeric fields in order
+        (
+            mom_bps_1m, mom_bps_5m, mom_bps_15m,
+            px_vs_vwap_bps_1m, px_vs_vwap_bps_5m, px_vs_vwap_bps_15m,
+            rvol_1m, rvol_5m, rvol_15m,
+            atr_1m, atr_5m, atr_15m,
+        ) = (list(args) + [None]*12)[:12]
+
     pool = await connect_pool()
     if not pool:
         return False
@@ -268,6 +277,7 @@ async def insert_features_1m(
     return True
 
 
+
 async def refresh_return_views() -> bool:
     """
     Refresh forward-return materialized views. (Non-concurrent to keep it simple.)
@@ -280,3 +290,11 @@ async def refresh_return_views() -> bool:
         await conn.execute("REFRESH MATERIALIZED VIEW labels_ret_15m;")
     return True
 
+
+
+async def insert_features_1m_dict(symbol: str, ts_utc, feat: dict, schema_version: int = 1) -> bool:
+    return await insert_features_1m(symbol, ts_utc, feat, schema_version=schema_version)
+
+
+async def insert_finding_row_params(ts_utc, agent, symbol, score, label, details_json) -> bool:
+    return await insert_finding_values(symbol, agent, float(score), str(label), details_json, ts_utc)
