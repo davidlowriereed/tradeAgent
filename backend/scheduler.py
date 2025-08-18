@@ -30,7 +30,7 @@ async def flush_minute(symbol: str):
     Safe to call each tick; only writes once per minute boundary.
     """
     # Use /debug/state equivalent from your in-memory bars if available
-        bar = await get_last_1m_bar(symbol)  # returns {ts_utc,o,h,l,c,v,vwap,trades}
+    bar = await get_last_1m_bar(symbol)  # returns {ts_utc,o,h,l,c,v,vwap,trades}
     if not bar or not bar.get("ts_utc"):
         return
     ts = bar["ts_utc"][:16]  # minute precision
@@ -49,6 +49,8 @@ async def flush_minute(symbol: str):
     await insert_bar_1m(symbol, bar["ts_utc"], bar)
     await insert_features_1m(symbol, bar["ts_utc"], fx, schema_version=1)
     _last_flushed_minute[key] = True
+
+
 AGENTS: List[Agent] = [
     RVOLSpikeAgent(interval_sec=5),
     CvdDivergenceAgent(interval_sec=10),
