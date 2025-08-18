@@ -145,8 +145,8 @@ async def signals(symbol: str):
 async def signals_tf(symbol: str):
     if symbol not in SYMBOLS:
         raise HTTPException(400, f"unknown symbol: {symbol}")
-    # compute_signals_tf is async elsewhere in your code, so await it here
-    return compute_signals_tf(symbol)
+    # compute_signals_tf is async: await it here
+    return await compute_signals_tf(symbol)
 
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
@@ -215,8 +215,8 @@ async def simulate_tick(symbol: str):
     # gather latest inputs
     from .signals import compute_signals_tf, compute_signals
     tf = await compute_signals_tf(symbol)
-    s  = await compute_signals(symbol)
-    last_px = (await compute_signals(symbol)).get("last_price") or 0.0
+    s  = compute_signals(symbol)               # ← sync call
+    last_px = s.get("last_price") or 0.0
 
     fsm = POSTURES.get(symbol) or PostureFSM()
     POSTURES[symbol] = fsm
