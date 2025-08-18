@@ -21,7 +21,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding, fetch_recent_findings, db_supervisor_loop
+from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding_row, fetch_recent_findings, db_supervisor_loop
 from .services.market import market_loop
 
 # helper: works whether a function is sync or async
@@ -180,7 +180,7 @@ async def run_now(names: str, symbol: str, insert: bool = False):
         try:
             finding = await agent.run_once(symbol)
             if finding and insert:
-                await _maybe_await(insert_finding({
+                await _maybe_await(insert_finding_row({
                     "agent": agent.name,
                     "symbol": symbol,
                     "score": float(finding.get("score", 0.0)),
