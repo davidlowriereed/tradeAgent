@@ -1,6 +1,19 @@
 # backend/app.py
 from __future__ import annotations
 
+
+def _coerce_details(d):
+    if isinstance(d, (dict, list)) or d is None:
+        return d or {}
+    if isinstance(d, str):
+        try:
+            x = json.loads(d)
+            return x if isinstance(x, (dict, list)) else {"raw": d}
+        except Exception:
+            return {"raw": d}
+    return {"raw": d}
+
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 try:
@@ -153,13 +166,19 @@ async def findings(symbol: Optional[str] = None, limit: int = 20):
     # tolerate sync/async fetch_recent_findings
     rows = await _maybe_await(fetch_recent_findings(symbol, limit))
     if rows and isinstance(rows, list) and isinstance(rows[0], dict) and "ts_utc" in rows[0]:
-        return {"findings": rows}
+            # Coerce details to objects (handles legacy text rows)
+    for f in rows:
+        if isinstance(f, dict):
+            f["details"] = _coerce_details(f.get("details"))
+    return {"findings": rows}
     # fallback to legacy in-mem shape
     out = []
     for f in list(RECENT_FINDINGS)[-limit:][::-1]:
         if symbol and f.get("symbol") != symbol:
             continue
-        out.append({"ts_utc": None, **f})
+        item = {"ts_utc": None, **f}
+        item["details"] = _coerce_details(item.get("details"))
+        out.append(item)
     return {"findings": out}
 
 @app.get("/agents")
