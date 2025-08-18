@@ -55,6 +55,33 @@ async def debug_env():
         "DB_TLS_INSECURE": os.getenv("DB_TLS_INSECURE"),
     }
 
+@app.get("/analytics/calibration")
+async def analytics_calibration(symbol: str):
+    pool = await connect_pool()
+    if not pool:
+        return {"ok": False, "error": "no-db"}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+        SELECT f.details->>'p_up' AS p_up_txt, r.ret
+        FROM findings f
+        JOIN ret_5m r ON r.symbol=f.symbol AND r.ts_utc=f.ts_utc
+        WHERE f.symbol=$1 AND f.agent='trend_score'
+          AND (f.details->>'p_up') IS NOT NULL
+        LIMIT 5000
+        """, symbol)
+        # bin p_up by deciles
+        import math
+        bins = {}
+        for r in rows:
+            try:
+                p = float(r["p_up_txt"])
+                b = min(9, int(p*10))
+                bins.setdefault(b, []).append(float(r["ret"]))
+            except: pass
+        summary = [{"bin": b/10.0, "n": len(v), "avg_ret": (sum(v)/len(v) if v else 0.0)} for b,v in sorted(bins.items())]
+        return {"ok": True, "deciles": summary}
+
+
 @app.get("/debug/llm")
 async def debug_llm(symbol: str = "BTC-USD"):
     try:
