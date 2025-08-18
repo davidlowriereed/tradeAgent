@@ -21,7 +21,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding, fetch_recent_findings
+from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding, fetch_recent_findings, db_supervisor_loop
 from .services.market import market_loop
 
 # helper: works whether a function is sync or async
@@ -66,9 +66,8 @@ async def debug_llm(symbol: str = "BTC-USD"):
 
 @app.on_event("startup")
 async def _startup():
-    # tolerate either sync or async db helpers
-    await _maybe_await(connect_pool())
-    await _maybe_await(ensure_schema())
+    # Start a supervisor to keep DB healthy even if TLS/env changes later
+    asyncio.create_task(db_supervisor_loop())
     asyncio.create_task(agents_loop())
     asyncio.create_task(market_loop())
 
