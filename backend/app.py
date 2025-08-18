@@ -28,6 +28,11 @@ from .services.market import market_loop
 async def _maybe_await(x):
     return await x if inspect.isawaitable(x) else x
 
+from .posture import PostureFSM
+from .sim import book_for
+POSTURES = { }  # symbol -> FSM
+POLICY = {"entry_up":0.65, "exit_down":0.52, "vwap_bps":15.0, "rvol":1.3}
+
 app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
@@ -163,3 +168,56 @@ async def run_now(names: str, symbol: str, insert: bool = False):
         except Exception as e:
             out["results"].append({"agent": agent.name, "error": f"{type(e).__name__}: {e}"})
     return out
+
+
+@app.get("/posture")
+async def get_posture(symbol: str):
+    fsm = POSTURES.get(symbol)
+    if not fsm:
+        fsm = POSTURES[symbol] = PostureFSM()
+    return {
+        "state": fsm.state,
+        "qty": fsm.pos.qty,
+        "entry_px": fsm.pos.entry_px,
+        "entry_ts": fsm.pos.entry_ts,
+        "daily_loss": fsm.daily_loss
+    }
+
+@app.post("/simulate/tick")
+async def simulate_tick(symbol: str):
+    # gather latest inputs
+    from .signals import compute_signals_tf, compute_signals
+    tf = await compute_signals_tf(symbol)
+    s  = await compute_signals(symbol)
+    last_px = (await compute_signals(symbol)).get("last_price") or 0.0
+
+    fsm = POSTURES.get(symbol) or PostureFSM()
+    POSTURES[symbol] = fsm
+    book = book_for(symbol)
+
+    evt = fsm.step(time.time(), book.equity, last_px, tf, s.get("trend_p_up",0.5), POLICY)
+    if not evt:
+        return {"ok": True, "action": None}
+    kind, side, qty, px, *rest = evt
+    if kind == "enter":
+        book.fill(symbol, "buy" if side=="long" else "sell", qty, px)
+        return {"ok": True, "action": {"enter": side, "qty": qty, "px": px}}
+    else:
+        pnl = rest[0] if rest else 0.0
+        # realize pnl into equity
+        book.equity += pnl
+        book.fill(symbol, "sell" if side=="long" else "buy", qty, px)
+        return {"ok": True, "action": {"exit": side, "qty": qty, "px": px, "pnl": pnl}, "equity": book.equity}
+
+@app.get("/simulate/book")
+async def simulate_book(symbol: str):
+    b = book_for(symbol)
+    return {"equity": b.equity, "orders": [o.__dict__ for o in b.orders[-50:]]}
+
+@app.post("/simulate/reset")
+async def simulate_reset(symbol: str):
+    from .sim import BOOKS
+    POSTURES.pop(symbol, None)
+    BOOKS.pop(symbol, None)
+    return {"ok": True}
+
