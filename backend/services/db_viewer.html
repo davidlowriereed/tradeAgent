@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DB Viewer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input[type=text] { padding: 6px 8px; min-width: 260px; }
+    button { padding: 8px 12px; cursor: pointer; border: 1px solid #ddd; border-radius: 8px; background: #f7f7f7; }
+    button:hover { background: #efefef; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .status { margin-left: 8px; font-size: 12px; color: #555; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #eee; padding: 6px 8px; vertical-align: top; }
+    th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
+    pre { background: #fafafa; border: 1px solid #eee; padding: 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+    .wrap { max-width: 1200px; margin: 0 auto; }
+    .muted { color: #888; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Database / API Viewer</h1>
+
+    <div class="toolbar">
+      <label>Base URL:
+        <input id="baseUrl" type="text" value="/" title="API base URL, e.g. / or https://your-app.example.com" />
+      </label>
+      <button id="btnFindings">Load /findings</button>
+      <button id="btnDBHealth">Load /db-health</button>
+      <label>Symbol: <input id="symbol" type="text" placeholder="e.g. AAPL" /></label>
+      <button id="btnPosture">Load /posture?symbol=…</button>
+      <span class="status" id="status"></span>
+    </div>
+
+    <div class="row" style="margin: 8px 0 16px;">
+      <input id="customPath" type="text" placeholder="Custom path, e.g. /simulate/book?symbol=AAPL or /signals_tf?symbol=AAPL" />
+      <button id="btnFetchCustom">Fetch</button>
+      <span class="muted">Tip: paths are appended to Base URL</span>
+    </div>
+
+    <div id="out"></div>
+  </div>
+
+<script>
+const out = document.getElementById('out');
+const statusEl = document.getElementById('status');
+const baseUrlEl = document.getElementById('baseUrl');
+const symbolEl = document.getElementById('symbol');
+const customPathEl = document.getElementById('customPath');
+
+function urlJoin(base, path) {
+  if (!base) return path;
+  if (base.endsWith('/') && path.startsWith('/')) return base.slice(0, -1) + path;
+  if (!base.endsWith('/') && !path.startsWith('/')) return base + '/' + path;
+  return base + path;
+}
+
+async function fetchJSON(path) {
+  const url = urlJoin(baseUrlEl.value.trim() || '/', path);
+  statusEl.textContent = 'Loading ' + url + ' …';
+  try {
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      // Fallback: if endpoint returns text
+      json = { raw: text };
+    }
+    statusEl.textContent = res.ok ? 'OK ' + res.status : 'Error ' + res.status;
+    return json;
+  } catch (e) {
+    statusEl.textContent = 'Fetch error: ' + e.message;
+    throw e;
+  }
+}
+
+function clearOut() { out.innerHTML = ''; }
+
+function renderJSON(data) {
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(data, null, 2);
+  out.appendChild(pre);
+}
+
+function isPlainObject(x){ return x && typeof x === 'object' && !Array.isArray(x); }
+
+function collectColumns(rows) {
+  const cols = new Set();
+  rows.forEach(r => Object.keys(r || {}).forEach(k => cols.add(k)));
+  return Array.from(cols);
+}
+
+function cellValue(v) {
+  if (v == null) return '';
+  if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') return String(v);
+  // object/array → pretty JSON (1-line if short)
+  const s = JSON.stringify(v);
+  return s && s.length > 120 ? '<pre>' + JSON.stringify(v, null, 2) + '</pre>' : s;
+}
+
+function renderTable(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const div = document.createElement('div');
+    div.textContent = Array.isArray(rows) ? 'No rows.' : 'Response is not an array.';
+    out.appendChild(div);
+    return;
+  }
+  const cols = collectColumns(rows);
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  cols.forEach(c => {
+    const th = document.createElement('th'); th.textContent = c; trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    cols.forEach(c => {
+      const td = document.createElement('td');
+      td.innerHTML = cellValue(r[c]);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  out.appendChild(table);
+}
+
+function renderAuto(data) {
+  clearOut();
+  if (Array.isArray(data)) {
+    renderTable(data);
+  } else if (isPlainObject(data)) {
+    // Try common shapes: {items:[...]}, {data:[...]}
+    if (Array.isArray(data.items)) return renderTable(data.items);
+    if (Array.isArray(data.data)) return renderTable(data.data);
+    // Otherwise JSON view
+    renderJSON(data);
+  } else {
+    renderJSON(data);
+  }
+}
+
+document.getElementById('btnFindings').addEventListener('click', async () => {
+  const data = await fetchJSON('/findings?limit=200');
+  renderAuto(data);
+});
+
+document.getElementById('btnDBHealth').addEventListener('click', async () => {
+  const data = await fetchJSON('/db-health');
+  renderAuto(data);
+});
+
+document.getElementById('btnPosture').addEventListener('click', async () => {
+  const sym = (symbolEl.value || '').trim();
+  if (!sym) { alert('Enter a symbol'); return; }
+  const data = await fetchJSON('/posture?symbol=' + encodeURIComponent(sym));
+  renderAuto(data);
+});
+
+document.getElementById('btnFetchCustom').addEventListener('click', async () => {
+  const p = (customPathEl.value || '').trim();
+  if (!p) { alert('Enter a path'); return; }
+  const data = await fetchJSON(p);
+  renderAuto(data);
+});
+</script>
+</body>
+</html>
