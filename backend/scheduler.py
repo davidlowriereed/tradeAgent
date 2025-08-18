@@ -30,8 +30,7 @@ async def flush_minute(symbol: str):
     Safe to call each tick; only writes once per minute boundary.
     """
     # Use /debug/state equivalent from your in-memory bars if available
-    from .bars import get_last_1m_bar  # implement this if not present
-    bar = await get_last_1m_bar(symbol)  # returns {ts_utc,o,h,l,c,v,vwap,trades}
+        bar = await get_last_1m_bar(symbol)  # returns {ts_utc,o,h,l,c,v,vwap,trades}
     if not bar or not bar.get("ts_utc"):
         return
     ts = bar["ts_utc"][:16]  # minute precision
