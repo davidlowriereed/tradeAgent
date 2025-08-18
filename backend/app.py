@@ -14,7 +14,7 @@ def _coerce_details(d):
     return {"raw": d}
 
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import HTMLResponse
 try:
     from fastapi.responses import ORJSONResponse  # type: ignore
@@ -26,6 +26,7 @@ except Exception:
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
 import asyncio, os
+from datetime import datetime, timezone
 import inspect  # for maybe_await
 import json
 import time
@@ -34,7 +35,7 @@ from .config import SYMBOLS, ALERT_WEBHOOK_URL, SLACK_ANALYSIS_ONLY
 from .signals import compute_signals, compute_signals_tf
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .state import trades, RECENT_FINDINGS
-from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding_row, fetch_recent_findings, db_supervisor_loop
+from .db import db_health as db_status, connect_pool, ensure_schema, insert_finding_row, fetch_recent_findings, db_supervisor_loop, get_posture, set_posture, record_trade, equity_curve
 from .services.market import market_loop
 
 # helper: works whether a function is sync or async
@@ -45,6 +46,11 @@ from .posture import PostureFSM
 from .sim import book_for
 POSTURES = { }  # symbol -> FSM
 POLICY = {"entry_up":0.65, "exit_down":0.52, "vwap_bps":15.0, "rvol":1.3}
+
+POSTURE_ENTRY_CONF = float(os.getenv("POSTURE_ENTRY_CONF","0.60"))
+COOLDOWN_SEC = int(os.getenv("AGENT_ALERT_COOLDOWN_SEC","60"))
+
+_last_step = {}  # symbol -> ts
 
 app = FastAPI(title="Opportunity Radar", default_response_class=default_resp)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
@@ -262,9 +268,72 @@ async def simulate_book(symbol: str):
     return {"equity": b.equity, "orders": [o.__dict__ for o in b.orders[-50:]]}
 
 @app.post("/simulate/reset")
-async def simulate_reset(symbol: str):
-    from .sim import BOOKS
-    POSTURES.pop(symbol, None)
-    BOOKS.pop(symbol, None)
+async def sim_reset(symbol: str):
+    await set_posture(symbol, "NO_POSITION", 0, None, "RESET")
     return {"ok": True}
 
+
+@app.post("/simulate/step")
+async def sim_step(symbol: str, source: str = "trend_score", payload: dict = Body(None)):
+    """
+    Accepts either the most recent finding payload or lets the server fetch it.
+    Policy: enter LONG if p_up>=ENTRY, enter SHORT if (1-p_up)>=ENTRY, exit on flip or cooldown.
+    """
+    now = datetime.now(timezone.utc)
+    last = _last_step.get(symbol)
+    if last and (now - last).total_seconds() < COOLDOWN_SEC:
+        return {"ok": True, "skipped": "cooldown"}
+    _last_step[symbol] = now
+
+    # get signal
+    if payload is None:
+        # pull last trend_score finding for symbol
+        pool = await connect_pool()
+        sig = None
+        if pool:
+            q = """SELECT details FROM findings
+                  WHERE symbol=$1 AND agent='trend_score'
+                  ORDER BY ts_utc DESC LIMIT 1"""
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(q, symbol)
+                if row:
+                    sig = row["details"]
+        payload = sig or {}
+
+    p_up = float(payload.get("p_up", 0.5))
+    posture = await get_posture(symbol)
+    status = posture.get("status", "NO_POSITION")
+    action = None
+
+    # decide
+    if status == "NO_POSITION":
+        if p_up >= POSTURE_ENTRY_CONF:
+            action = "ENTER_LONG"
+        elif (1.0 - p_up) >= POSTURE_ENTRY_CONF:
+            action = "ENTER_SHORT"
+    elif status == "LONG":
+        if p_up < 0.5:
+            action = "EXIT_LONG"
+    elif status == "SHORT":
+        if p_up > 0.5:
+            action = "EXIT_SHORT"
+
+    # execute at last price we know (fallback vwap or 0)
+    px = float(payload.get("last_price") or payload.get("vwap") or 0.0)
+    if action and px:
+        qty = 1.0
+        await record_trade(symbol, action, qty, px, reason=f"{source} p_up={p_up:.3f}")
+        if action == "ENTER_LONG":
+            await set_posture(symbol, "LONG", qty, px, action)
+        elif action == "EXIT_LONG":
+            await set_posture(symbol, "NO_POSITION", 0, None, action)
+        elif action == "ENTER_SHORT":
+            await set_posture(symbol, "SHORT", -qty, px, action)
+        elif action == "EXIT_SHORT":
+            await set_posture(symbol, "NO_POSITION", 0, None, action)
+
+    return {"ok": True, "p_up": p_up, "action": action, "status": (await get_posture(symbol))}
+
+@app.get("/simulate/equity")
+async def sim_equity(symbol: str):
+    return await equity_curve(symbol)
