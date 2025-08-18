@@ -172,7 +172,20 @@ async def agents_loop():
                     except Exception as e:
                         await heartbeat(agent.name, f"error: {type(e).__name__}")
                         continue
-        except Exception:
-            pass
+            # --- Persist the just-closed 1m bar + features for each symbol ---
+            for sym in SYMBOLS:
+                try:
+                    await flush_minute(sym)
+                except Exception:
+                    pass
+
+            # --- Low-frequency refresh of return views (~60s if TICK_SEC=5) ---
+            global _view_refresh_counter
+            _view_refresh_counter = (_view_refresh_counter + 1) % 12
+            if _view_refresh_counter == 0:
+                try:
+                    await refresh_return_views()
+                except Exception:
+                    pass
 
         await asyncio.sleep(TICK_SEC)
