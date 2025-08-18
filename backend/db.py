@@ -138,8 +138,13 @@ async def db_health() -> Dict[str, Any]:
         return {"ok": False, "mode": _tls_mode, "error": _last_db_error}
 
 
-async def insert_finding(row: Dict[str, Any]) -> None:
-    try:
+async def insert_finding_row(row: dict) -> bool:
+    return await insert_finding_values(
+        row.get("symbol",""), row.get("agent",""),
+        float(row.get("score",0.0)), row.get("label",""),
+        row.get("details",{}), row.get("ts_utc")
+    )
+
         pool = await connect_pool()
         if not pool:
             raise RuntimeError("no_pool")
@@ -190,7 +195,7 @@ async def db_supervisor_loop(interval_sec: int = 30):
         await asyncio.sleep(interval_sec)
 
 
-async def insert_finding(symbol: str, agent: str, score: float, label: str, details: dict, ts_utc: str | None = None):
+async def insert_finding_values(symbol: str, agent: str, score: float, label: str, details: dict, ts_utc: str | None = None) -> bool:
     pool = await connect_pool()
     if not pool:
         # in-memory fallback
@@ -205,10 +210,3 @@ async def insert_finding(symbol: str, agent: str, score: float, label: str, deta
         VALUES(COALESCE($1, NOW()), $2, $3, $4, $5, $6)
         """, ts_utc, agent, symbol, float(score), label, json.dumps(details))
     return True
-
-async def insert_finding_row(row: dict):
-    return await insert_finding(
-        row.get("symbol",""), row.get("agent",""), float(row.get("score",0.0)),
-        row.get("label",""), row.get("details",{}), row.get("ts_utc")
-    )
-
