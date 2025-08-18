@@ -191,3 +191,92 @@ async def insert_finding_values(symbol: str, agent: str, score: float, label: st
         VALUES(COALESCE($1, NOW()), $2, $3, $4, $5, $6)
         """, ts_utc, agent, symbol, float(score), label, json.dumps(details))
     return True
+
+
+# ---------- Bars & Features insert helpers ----------
+
+async def insert_bar_1m(symbol: str, ts_utc, o, h, l, c, v, vwap=None, trades=None) -> bool:
+    """
+    Upsert a 1m bar. ts_utc can be ISO string or datetime; DB column is timestamptz.
+    """
+    pool = await connect_pool()
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO bars_1m(symbol, ts_utc, o,h,l,c,v,vwap,trades)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (symbol, ts_utc) DO UPDATE SET
+              o=EXCLUDED.o, h=EXCLUDED.h, l=EXCLUDED.l, c=EXCLUDED.c,
+              v=EXCLUDED.v, vwap=EXCLUDED.vwap, trades=EXCLUDED.trades
+            """,
+            symbol, ts_utc, o, h, l, c, v, vwap, trades
+        )
+    return True
+
+
+async def insert_features_1m(
+    symbol: str, ts_utc,
+    mom_bps_1m=None, mom_bps_5m=None, mom_bps_15m=None,
+    px_vs_vwap_bps_1m=None, px_vs_vwap_bps_5m=None, px_vs_vwap_bps_15m=None,
+    rvol_1m=None, rvol_5m=None, rvol_15m=None,
+    atr_1m=None, atr_5m=None, atr_15m=None,
+    schema_version: int = 1
+) -> bool:
+    """
+    Upsert a 1m feature row aligned to the bar timestamp.
+    """
+    pool = await connect_pool()
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO features_1m(
+                symbol, ts_utc,
+                mom_bps_1m, mom_bps_5m, mom_bps_15m,
+                px_vs_vwap_bps_1m, px_vs_vwap_bps_5m, px_vs_vwap_bps_15m,
+                rvol_1m, rvol_5m, rvol_15m,
+                atr_1m, atr_5m, atr_15m,
+                schema_version
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+            )
+            ON CONFLICT (symbol, ts_utc) DO UPDATE SET
+                mom_bps_1m=EXCLUDED.mom_bps_1m,
+                mom_bps_5m=EXCLUDED.mom_bps_5m,
+                mom_bps_15m=EXCLUDED.mom_bps_15m,
+                px_vs_vwap_bps_1m=EXCLUDED.px_vs_vwap_bps_1m,
+                px_vs_vwap_bps_5m=EXCLUDED.px_vs_vwap_bps_5m,
+                px_vs_vwap_bps_15m=EXCLUDED.px_vs_vwap_bps_15m,
+                rvol_1m=EXCLUDED.rvol_1m,
+                rvol_5m=EXCLUDED.rvol_5m,
+                rvol_15m=EXCLUDED.rvol_15m,
+                atr_1m=EXCLUDED.atr_1m,
+                atr_5m=EXCLUDED.atr_5m,
+                atr_15m=EXCLUDED.atr_15m,
+                schema_version=EXCLUDED.schema_version
+            """,
+            symbol, ts_utc,
+            mom_bps_1m, mom_bps_5m, mom_bps_15m,
+            px_vs_vwap_bps_1m, px_vs_vwap_bps_5m, px_vs_vwap_bps_15m,
+            rvol_1m, rvol_5m, rvol_15m,
+            atr_1m, atr_5m, atr_15m,
+            schema_version
+        )
+    return True
+
+
+async def refresh_return_views() -> bool:
+    """
+    Refresh forward-return materialized views. (Non-concurrent to keep it simple.)
+    """
+    pool = await connect_pool()
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute("REFRESH MATERIALIZED VIEW labels_ret_5m;")
+        await conn.execute("REFRESH MATERIALIZED VIEW labels_ret_15m;")
+    return True
+
