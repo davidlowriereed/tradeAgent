@@ -145,25 +145,6 @@ async def insert_finding_row(row: dict) -> bool:
         row.get("details",{}), row.get("ts_utc")
     )
 
-        pool = await connect_pool()
-        if not pool:
-            raise RuntimeError("no_pool")
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO findings(ts_utc, agent, symbol, score, label, details)
-                VALUES(timezone('utc', now()), $1, $2, $3, $4, $5::jsonb)
-                """,
-                row.get("agent"),
-                row.get("symbol"),
-                float(row.get("score") or 0.0),
-                row.get("label"),
-                json.dumps(row.get("details") or {}),
-            )
-    except Exception:
-        # keep your graceful fallback
-        RECENT_FINDINGS.appendleft(row)
-
 async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
     """Return newest rows from DB when available; else fall back to in-mem buffer."""
     pool = await connect_pool()
