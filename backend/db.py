@@ -70,9 +70,20 @@ async def connect_pool():
             except ssl.SSLCertVerificationError as e:
                 _last_db_error = f"{type(e).__name__}: {e}"
 
-        # 2) fallback: encrypted/no-verify (≈ sslmode=require)
-        POOL = await _make_pool(True)
-        _tls_mode, _last_db_error = "require", None
+        # 2) try "require" (ssl=True) which is encrypted and may verify via system store
+        try:
+            POOL = await _make_pool(True)
+            _tls_mode, _last_db_error = "require", None
+            return POOL
+        except ssl.SSLCertVerificationError as e:
+            _last_db_error = f"{type(e).__name__}: {e}"
+
+        # 3) final fallback: encrypted/no-verify (temporary safety net)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        POOL = await _make_pool(ctx)
+        _tls_mode, _last_db_error = "insecure", None
         return POOL
 
     except Exception as e:
@@ -165,3 +176,16 @@ async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
         rows = await (conn.fetch(sql, limit, symbol) if symbol else conn.fetch(sql, limit))
     # asyncpg Record → dict
     return [dict(r) for r in rows]
+
+# --- background supervisor to keep DB healthy ---
+async def db_supervisor_loop(interval_sec: int = 30):
+    global _last_db_error
+    while True:
+        try:
+            pool = await connect_pool()
+            if pool:
+                await ensure_schema()
+        except Exception as e:
+            _last_db_error = f"{type(e).__name__}: {e}"
+        await asyncio.sleep(interval_sec)
+
