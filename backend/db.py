@@ -188,8 +188,8 @@ async def insert_finding_values(symbol: str, agent: str, score: float, label: st
     async with pool.acquire() as conn:
         await conn.execute("""
         INSERT INTO findings(ts_utc, agent, symbol, score, label, details)
-        VALUES(COALESCE($1, NOW()), $2, $3, $4, $5, $6)
-        """, ts_utc, agent, symbol, float(score), label, json.dumps(details))
+        VALUES(COALESCE($1, NOW()), $2, $3, $4, $5, $6::jsonb)
+        """, ts_utc, agent, symbol, float(score), label, details)
     return True
 
 
