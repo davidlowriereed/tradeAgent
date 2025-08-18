@@ -122,8 +122,7 @@ async def ensure_schema():
     async with pool.acquire() as conn:
         for s in stmts:
             await conn.execute(s)
-
-    await conn.execute("""
+        await conn.execute("""
     CREATE TABLE IF NOT EXISTS bars_1m (
       symbol   text NOT NULL,
       ts_utc   timestamptz NOT NULL,
@@ -159,8 +158,8 @@ async def ensure_schema():
     CREATE INDEX IF NOT EXISTS features_1m_symbol_ts ON features_1m(symbol, ts_utc);
     """)
 
-    # Forward return materialized views (safe to (re)create)
-    await conn.execute("""
+        # Forward return materialized views (safe to (re)create)
+        await conn.execute("""
     CREATE MATERIALIZED VIEW IF NOT EXISTS labels_ret_5m AS
     SELECT b.symbol, b.ts_utc,
            LEAD(b.c, 5) OVER (PARTITION BY b.symbol ORDER BY b.ts_utc) AS c_fwd,
