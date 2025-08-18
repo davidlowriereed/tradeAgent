@@ -2,7 +2,6 @@ import time, asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, Tuple, List, Optional
-from .app import simulate_tick
 
 from .config import (
     SYMBOLS, SLACK_ANALYSIS_ONLY, ALERT_WEBHOOK_URL, ALERT_VERBOSE, FEATURE_REVERSAL,
