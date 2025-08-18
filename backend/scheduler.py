@@ -10,7 +10,7 @@ from .config import (
 from .signals import compute_signals, compute_signals_tf
 from .state import POSTURE_STATE, trades, RECENT_FINDINGS
 from .services.slack import should_post, post_webhook
-from .db import insert_finding, heartbeat, insert_bar_1m, insert_features_1m, refresh_return_views
+from .db import insert_finding_row, heartbeat, insert_bar_1m, insert_features_1m, refresh_return_views
 
 from .agents.base import Agent
 from .agents.rvol_spike import RVOLSpikeAgent
@@ -30,6 +30,7 @@ async def flush_minute(symbol: str):
     Safe to call each tick; only writes once per minute boundary.
     """
     # Use /debug/state equivalent from your in-memory bars if available
+    from .bars import get_last_1m_bar  # implement this if not present
     bar = await get_last_1m_bar(symbol)  # returns {ts_utc,o,h,l,c,v,vwap,trades}
     if not bar or not bar.get("ts_utc"):
         return
@@ -49,8 +50,6 @@ async def flush_minute(symbol: str):
     await insert_bar_1m(symbol, bar["ts_utc"], bar)
     await insert_features_1m(symbol, bar["ts_utc"], fx, schema_version=1)
     _last_flushed_minute[key] = True
-
-
 AGENTS: List[Agent] = [
     RVOLSpikeAgent(interval_sec=5),
     CvdDivergenceAgent(interval_sec=10),
@@ -115,7 +114,7 @@ async def agents_loop():
 
                         # ✅ await the async insert; pass a dict body
                         try:
-                            await insert_finding({
+                            await insert_finding_row({
                                 "agent": agent.name,
                                 "symbol": sym,
                                 "score": float(finding.get("score", 0.0)),
