@@ -166,7 +166,7 @@ async def findings(symbol: Optional[str] = None, limit: int = 20):
     # tolerate sync/async fetch_recent_findings
     rows = await _maybe_await(fetch_recent_findings(symbol, limit))
     if rows and isinstance(rows, list) and isinstance(rows[0], dict) and "ts_utc" in rows[0]:
-            # Coerce details to objects (handles legacy text rows)
+    # Coerce details to objects (handles legacy text rows)
     for f in rows:
         if isinstance(f, dict):
             f["details"] = _coerce_details(f.get("details"))
