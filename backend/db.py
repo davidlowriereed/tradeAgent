@@ -1,7 +1,28 @@
 # backend/db.py
 from __future__ import annotations
-import os, json, asyncio, ssl, base64
+import asyncio, json, os, ssl, base64
 from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone
+import json
+import asyncpg
+from asyncpg.types import Json
+
+from .config import DATABASE_URL
+from .state import RECENT_FINDINGS
+
+# ----- heartbeat (used by /health) -----
+HEARTBEATS: dict[str, dict] = {}
+async def heartbeat(name: str, status: str = "ok") -> None:
+    HEARTBEATS[name] = {"status": status, "last_run": datetime.now(timezone.utc).isoformat()}
+heartbeats = HEARTBEATS  # compat alias
+
+_pool = None  # your global pool
+
+# ----- pool + error state -----
+POOL: Optional["asyncpg.pool.Pool"] = None
+_last_db_error: Optional[str] = None
+_tls_mode: str = "unknown"  # "verify-ca" | "require" | "insecure"
+
 try:
     import asyncpg  # type: ignore
     from asyncpg.types import Json
