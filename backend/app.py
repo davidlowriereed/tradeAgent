@@ -17,6 +17,21 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 
 _last_step = {}
 
+from .db import ensure_schema_v2
+from .scheduler import agents_loop
+
+@app.on_event("startup")
+async def _startup():
+    try:
+        await ensure_schema_v2()   # idempotent, safe
+    except Exception as e:
+        print("[schema] ensure_schema_v2 failed:", e)
+    # kick off background agents loop
+    try:
+        asyncio.create_task(agents_loop())
+    except Exception as e:
+        print("[scheduler] failed to start agents_loop:", e)
+
 @app.get("/health")
 async def health():
     try:
