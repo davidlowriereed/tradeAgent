@@ -338,40 +338,50 @@ async function refreshFindings() {
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
-  
 function pct(x,dp=1){ return Number.isFinite(x) ? (x*100).toFixed(dp)+"%" : "–"; }
-  
 function formatDetails(f){
-  let d = (f.details ?? {});
-  if (typeof d === 'string') { try { d = JSON.parse(d); } catch { /* keep string */ } }
-  const label = (f.label || f.agent || '').toLowerCase();
-
-  if (label === 'trend_score'){
-    const p  = Number(d.p_up ?? 0.5);
-    const p1 = Number(d.p_1m ?? 0.5), p5 = Number(d.p_5m ?? 0.5), p15 = Number(d.p_15m ?? 0.5);
-    return `<span class="muted">trend_score</span> · p_up <b>${pct(p)}</b> <span class="muted">(1m ${pct(p1,2)} · 5m ${pct(p5,2)} · 15m ${pct(p15,2)})</span>`;
+  let d = f.details;
+  // Coerce legacy stringified JSON to object
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch { d = { raw: String(d) }; }
   }
+  d = d || {};
+  const label = f.label || '';
 
-  if (label === 'llm_signal' || (f.agent||'').toLowerCase()==='llm_analyst'){
-    const posture = String(d.posture || 'flat').toLowerCase();
+  if (label === 'llm_signal') {
+    const posture = (d.posture || 'flat').toLowerCase();
     const conf = Number(d.confidence ?? 0);
-    const rationale = escapeHtml((d.rationale||'').trim());
-    const short = rationale.length > 220 ? rationale.slice(0,220) + '…' : rationale;
+    const confPct = Number.isFinite(conf) ? (conf*100).toFixed(0) + '%' : '–';
+
     const chips = [
-      d.mom_1m!=null ? `<span class="chip">mom1: <b>${fmt(Number(d.mom_1m),1)}</b></span>` : '',
-      d.rvol_1m!=null ? `<span class="chip">rvol1: <b>${fmt(Number(d.rvol_1m),2)}x</b></span>` : '',
-      d.trend_p_up!=null ? `<span class="chip">trend_p_up: <b>${pct(Number(d.trend_p_up))}</b></span>` : ''
-    ].filter(Boolean).join('');
-    return `<span class="muted">llm</span> · <span class="badge posture ${posture}">${posture.toUpperCase()}</span> · <span class="muted">@ ${pct(conf)}</span>
-            <div class="kv">${chips}</div>
-            ${short ? `<div class="muted" title="${rationale}">${short}</div>` : ''}`;
+      `<span class="chip"><b>posture</b> ${escapeHtml(posture)}</span>`,
+      `<span class="chip"><b>conf</b> ${confPct}</span>`,
+      `<span class="chip"><b>mom_1m</b> ${fmt(Number(d.mom_1m||0),1)} bps</span>`,
+      `<span class="chip"><b>rvol_1m</b> ${fmt(Number(d.rvol_1m||0),2)}x</span>`,
+      `<span class="chip"><b>trend_p_up</b> ${fmt(Number(d.trend_p_up ?? 0.5),2)}</span>`
+    ].join(' ');
+
+    const rationale = d.rationale ? `<div class="sub" style="margin-top:6px">${escapeHtml(d.rationale)}</div>` : '';
+    const postureBadge = `<span class="badge posture ${posture === 'long' ? 'long' : posture === 'short' ? 'short' : 'flat'}">${posture.toUpperCase()}</span>`;
+    return `${postureBadge}<div class="kv">${chips}</div>${rationale}`;
   }
-   // fallback: compact JSON in code block with tooltip
+
+  if (label === 'trend_score') {
+    const chips = [
+      `<span class="chip"><b>p_up</b> ${fmt(Number(d.p_up ?? 0.5),2)}</span>`,
+      `<span class="chip"><b>p_1m</b> ${fmt(Number(d.p_1m ?? 0.5),2)}</span>`,
+      `<span class="chip"><b>p_5m</b> ${fmt(Number(d.p_5m ?? 0.5),2)}</span>`,
+      d.p_15m !== undefined ? `<span class=\"chip\"><b>p_15m</b> ${fmt(Number(d.p_15m),2)}</span>` : '',
+      `<span class=\"chip\"><b>p_vwap</b> ${fmt(Number(d.p_vwap ?? 0.5),2)}</span>`
+    ].filter(Boolean).join(' ');
+    return `<div class=\"kv\">${chips}</div>`;
+  }
+
+  // Fallback: pretty JSON
   try {
-    const raw = typeof d === 'string' ? d : JSON.stringify(d);
-    return `<code class="json" title="raw details">${escapeHtml(raw)}</code>`;
+    return `<code class=\"json\">${escapeHtml(JSON.stringify(d))}</code>`;
   } catch {
-    return `<code class="json">{}</code>`;
+    return `<code class=\"json\">${escapeHtml(String(d))}</code>`;
   }
 }
 
@@ -382,7 +392,7 @@ function setupControls() {
     CURRENT = sel.value; localStorage.setItem('symbol', CURRENT);
     byId('debugSymbol').lastElementChild.textContent = `symbol: ${CURRENT}`;
     // clear charts on symbol switch for clarity
-    Object.values(charts).forEach(c => { c.data.labels = []; c.data.datasets[0].data = []; c.update(); });
+    Object.values(charts).forEach(c => { c.data.labels = []; if (c.data && c.data.datasets) { c.data.datasets.forEach(ds => ds.data = []); } c.update(); });
   });
   byId('interval').addEventListener('change', (e)=>{
     const v = Number(e.target.value)||5; POLL_MS = v*1000; restartPolling();
