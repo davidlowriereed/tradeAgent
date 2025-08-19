@@ -5,6 +5,7 @@ from typing import Optional, Any, Dict
 from datetime import datetime, timezone
 import json
 import asyncpg
+from asyncpg.types import Json
 
 from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
@@ -42,6 +43,7 @@ def _build_ssl_context_from_env() -> Optional[ssl.SSLContext]:
 
 async def _make_pool(ssl_opt):
     import asyncpg
+from asyncpg.types import Json
     return await asyncpg.create_pool(
         DATABASE_URL,
         min_size=1, max_size=5,
@@ -164,39 +166,43 @@ async def db_health() -> Dict[str, Any]:
         return {"ok": False, "mode": _tls_mode, "error": _last_db_error}
 
 
+
 async def insert_finding_row(row: dict) -> None:
     """
-    row = {agent, symbol, score, label, details(dict)}
-    Writes to Postgres if pool is ready; else appends to in-mem fallback.
+    Canonical insert: row = {agent, symbol, score, label, details(dict)}
+    - Uses connect_pool() so we don't rely on a separate _pool.
+    - Sends details via asyncpg.types.Json to ensure proper JSON encoding.
+    - Falls back to RECENT_FINDINGS if no DB is available.
     """
-    if not _pool:
-        from .state import RECENT_FINDINGS
+    pool = await connect_pool()
+    details_obj = row.get("details") or {}
+    if not pool:
+        # in-mem fallback keeps UI responsive
         RECENT_FINDINGS.append({
             "ts_utc": None,
             "agent": row.get("agent"),
             "symbol": row.get("symbol"),
             "score": row.get("score"),
             "label": row.get("label"),
-            "details": row.get("details") or {},
+            "details": details_obj,
         })
         return
 
-    q = """
+    sql = """
       INSERT INTO findings(agent, symbol, score, label, details)
-      VALUES($1, $2, $3, $4, $5::jsonb)
+      VALUES($1, $2, $3, $4, $5)
     """
-    details_text = json.dumps(row.get("details") or {})
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
-            q,
+            sql,
             str(row.get("agent") or ""),
             str(row.get("symbol") or ""),
             float(row.get("score") or 0.0),
             str(row.get("label") or ""),
-            details_text,  # <-- TEXT here; SQL casts to jsonb
+            Json(details_obj),  # ensure JSON, column is jsonb
         )
 
-async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
+async def fetch_recent_findingsasync def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
     """Return newest rows from DB when available; else fall back to in-mem buffer."""
     pool = await connect_pool()
     if not pool:
