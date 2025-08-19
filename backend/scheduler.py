@@ -10,6 +10,39 @@ from .db import insert_finding_row, heartbeat  # JSONB-safe insert, heartbeat
 TICK_SEC = int(os.getenv("SCHED_TICK_SEC", "5"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").split(",") if s.strip()]
 
+
+from datetime import datetime, timezone
+from .signals import compute_signals_tf
+from .db import insert_features_1m
+
+_last_feat_min: dict[str, str] = {}  # "SYMBOL:YYYY-MM-DDTHH:MM" -> True
+
+
+async def _flush_features_minute(symbol: str):
+    """Write a features_1m snapshot once per minute per symbol."""
+    tf = await compute_signals_tf(symbol)  # async by your prior contract
+    ts_min = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    key = f"{symbol}:{ts_min.isoformat(timespec='minutes')}"
+    if _last_feat_min.get(key):
+        return
+    feat_rec = {
+        "mom_bps_1m":         tf.get("mom_bps_1m"),
+        "mom_bps_5m":         tf.get("mom_bps_5m"),
+        "mom_bps_15m":        tf.get("mom_bps_15m"),
+        "px_vs_vwap_bps_1m":  tf.get("px_vs_vwap_bps_1m"),
+        "px_vs_vwap_bps_5m":  tf.get("px_vs_vwap_bps_5m"),
+        "px_vs_vwap_bps_15m": tf.get("px_vs_vwap_bps_15m"),
+        "rvol_1m":            tf.get("rvol_1m"),
+        "atr_1m":             tf.get("atr_1m"),
+        "schema_version":     1,
+    }
+    try:
+        await insert_features_1m(symbol, ts_min, feat_rec)
+        _last_feat_min[key] = True
+    except Exception as e:
+        # keep loop healthy; you'll still see errors in logs
+        pass
+
 # -----------------------------------------------------------------------------
 # Resilient agent loader — tolerates class name changes
 # -----------------------------------------------------------------------------
@@ -86,10 +119,29 @@ async def run_agent_once(agent, symbol: str, insert: bool = True) -> Optional[di
 # Background loop
 # -----------------------------------------------------------------------------
 async def agents_loop():
-    global _LAST_RUN
+    """
+    Main scheduler loop:
+      - runs each agent per symbol
+      - heartbeats for liveness
+      - once-per-minute feature snapshot into features_1m
+      - low-frequency refresh of forward-return views
+    """
+    import time
+    from datetime import datetime, timezone
+    from .signals import compute_signals_tf
+    from .db import insert_features_1m, refresh_return_views, heartbeat
+
+    global _LAST_RUN, _last_feat_min, _view_refresh_counter
+    if "_last_feat_min" not in globals():
+        _last_feat_min = {}  # key: f"{symbol}:{YYYY-MM-DDTHH:MM}"
+    if "_view_refresh_counter" not in globals():
+        _view_refresh_counter = 0
+
     while True:
         loop_start = time.time()
+
         for symbol in SYMBOLS:
+            # 1) Run agents
             for name, agent in AGENTS.items():
                 try:
                     await run_agent_once(agent, symbol, insert=True)
@@ -99,12 +151,45 @@ async def agents_loop():
                 except Exception:
                     # keep the loop healthy even if one agent fails
                     pass
-        # liveness breadcrumb
+
+            # 2) Minute-close feature snapshot (once per minute per symbol)
+            try:
+                ts_min = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+                key = f"{symbol}:{ts_min.isoformat(timespec='minutes')}"
+                if not _last_feat_min.get(key):
+                    tf = await compute_signals_tf(symbol)  # async
+                    feat = {
+                        "mom_bps_1m":         tf.get("mom_bps_1m"),
+                        "mom_bps_5m":         tf.get("mom_bps_5m"),
+                        "mom_bps_15m":        tf.get("mom_bps_15m"),
+                        "px_vs_vwap_bps_1m":  tf.get("px_vs_vwap_bps_1m"),
+                        "px_vs_vwap_bps_5m":  tf.get("px_vs_vwap_bps_5m"),
+                        "px_vs_vwap_bps_15m": tf.get("px_vs_vwap_bps_15m"),
+                        "rvol_1m":            tf.get("rvol_1m"),
+                        "atr_1m":             tf.get("atr_1m"),
+                        "schema_version":     1,
+                    }
+                    await insert_features_1m(symbol, ts_min, feat)
+                    _last_feat_min[key] = True
+            except Exception:
+                # never let persistence hiccups break the loop
+                pass
+
+        # 3) Liveness breadcrumb
         try:
             await heartbeat("scheduler")
         except Exception:
             pass
 
-        # pace the loop
+        # 4) Low-frequency refresh of return views (~once/min if TICK_SEC≈5)
+        try:
+            _view_refresh_counter = (_view_refresh_counter + 1) % 12
+            if _view_refresh_counter == 0:
+                await refresh_return_views()
+        except Exception:
+            pass
+
+        # 5) Pace the loop
         elapsed = time.time() - loop_start
         await asyncio.sleep(max(0.0, TICK_SEC - elapsed))
+
