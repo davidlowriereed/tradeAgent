@@ -4,12 +4,20 @@ import asyncio, json, os, ssl, base64
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
+# Import asyncpg; only treat a missing package as "not installed"
 try:
     import asyncpg  # type: ignore
-    from asyncpg.types import Json
+except ModuleNotFoundError:
+    asyncpg = None  # truly not installed
+
+# 'Json' helper is optional and has moved across versions; don't fail if missing
+try:
+    from asyncpg.types import Json  # optional
 except Exception:
-    asyncpg = None
-    Json = None
+    # Minimal fallback so references won't break if you ever use Json
+    class Json:  # type: ignore
+        def __init__(self, obj): self.obj = obj
+
 
 # -------------------- Heartbeat --------------------
 HEARTBEATS: dict[str, dict] = {}
