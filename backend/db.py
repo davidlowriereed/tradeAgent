@@ -167,6 +167,24 @@ async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[
     return out
 
 # -------------------- Bars (1m) --------------------
+
+# -------------------- Bars (1m) — stitched last trade (option 3a) --------------------
+async def insert_bar_1m_stitched(symbol: str, ts_utc, price: float, vwap: float|None=None, trades: int|None=None):
+    """
+    Quick & dirty: write a bar each minute using 'price' for o/h/l/c and 0 volume.
+    DO NOTHING on conflict so repeated calls in the same minute are safe.
+    """
+    pool = await connect_pool()
+    sql = """
+        INSERT INTO bars_1m (symbol, ts_utc, o,h,l,c,v,vwap,trades)
+        VALUES ($1,$2,$3,$3,$3,$3,0,$4,$5)
+        ON CONFLICT (symbol, ts_utc) DO NOTHING
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(sql, symbol, ts_utc, float(price),
+                           None if vwap is None else float(vwap),
+                           None if trades is None else int(trades))
+
 async def insert_bar_1m(symbol: str, ts_utc, *args, **kwargs) -> bool:
     """
     Upsert a 1m bar.
