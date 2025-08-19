@@ -12,7 +12,7 @@ SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").spl
 
 
 from datetime import datetime, timezone
-from .signals import compute_signals_tf
+from .signals import compute_signals_tf, compute_signals
 from .db import insert_features_1m
 
 _last_feat_min: dict[str, str] = {}  # "SYMBOL:YYYY-MM-DDTHH:MM" -> True
@@ -128,7 +128,7 @@ async def agents_loop():
     """
     import time
     from datetime import datetime, timezone
-    from .signals import compute_signals_tf
+    from .signals import compute_signals_tf, compute_signals
     from .db import insert_features_1m, refresh_return_views, heartbeat
 
     global _LAST_RUN, _last_feat_min, _view_refresh_counter
