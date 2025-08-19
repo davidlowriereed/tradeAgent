@@ -106,33 +106,22 @@ async def ensure_schema_v2():
     await ensure_schema()
 
 # -------------------- Findings --------------------
-async def insert_finding_row(row: dict) -> None:
-    """
-    row = {agent, symbol, score, label, details, ts_utc?}
-    details may be dict or str; we always send JSON text and cast to jsonb.
-    """
-    ts = row.get("ts_utc")  # allow caller to pass ts_utc; else DB NOW()
-    details = row.get("details") or {}
-
-    # Always serialize; drivers are happiest with text here.
-    if not isinstance(details, str):
-        details = json.dumps(details, separators=(",", ":"))
-
+async def insert_finding_row(row: dict):
     sql = """
-        INSERT INTO findings (agent, symbol, ts_utc, score, label, details)
-        VALUES ($1, $2, COALESCE($3, NOW()), $4, $5, $6::jsonb)
+        INSERT INTO findings (agent, symbol, score, label, details)
+        VALUES ($1,$2,$3,$4, COALESCE($5::jsonb, '{}'::jsonb))
     """
+    details_json = json.dumps(row.get("details") or {})
     async with pool.acquire() as conn:
         await conn.execute(
             sql,
-            str(row["agent"]),
-            str(row["symbol"]),
-            ts,
-            float(row["score"]),
-            str(row["label"]),
-            details,
+            str(row.get("agent") or ""),
+            str(row.get("symbol") or ""),
+            float(row.get("score") or 0.0),
+            str(row.get("label") or ""),
+            details_json,
         )
-
+        
 async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[dict]:
     """Read latest findings (jsonb 'details' comes back as a dict from asyncpg)."""
     pool = await connect_pool()
