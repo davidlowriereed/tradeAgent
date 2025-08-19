@@ -40,24 +40,18 @@ async def _run_agent_once(agent, symbol: str, insert: bool = True) -> bool:
         print(f"Agent {agent.name} failed on {symbol}: {e}")
         return False
 
-    if not finding:
-        return False
-
-    # Build the row in the unified format
-    row = {
-        "agent": agent.name,
-        "symbol": symbol,
-        "score": float(finding.get("score", 0.0)),
-        "label": str(finding.get("label", agent.name)),
-        "details": finding.get("details") or {},
-    }
-
-    # Write to DB if requested
-    if insert:
-        await insert_finding_row(row)
-
-    # Always append to in-memory buffer for UI responsiveness
-    RECENT_FINDINGS.append({**row, "ts_utc": None})
+    finding = await agent.run_once(symbol)
+        if finding:
+            row = {
+                "agent": agent.name,
+                "symbol": symbol,
+                "score": float(finding.get("score") or 0.0),
+                "label": str(finding.get("label") or agent.name),
+                "details": finding.get("details") or {},
+            }
+            if insert:  # run-now flag or scheduled inserts
+                await insert_finding_row(row)
+            RECENT_FINDINGS.append({**row, "ts_utc": None})
 
     return True
 
