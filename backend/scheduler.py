@@ -1,11 +1,11 @@
 from __future__ import annotations
-import asyncio, os, time
+import asyncio
 from typing import Dict, List
 from datetime import datetime, timezone
 
 from .config import SYMBOLS
-from .state import RECENT_FINDINGS
 from .db import insert_finding_row, heartbeat
+from .state import RECENT_FINDINGS
 
 # --- Agents ---
 from .agents.rvol_spike import RvolSpikeAgent
@@ -29,41 +29,37 @@ def list_agents_last_run() -> Dict[str, Dict[str, str]]:
     """Used by /health for quick UI diagnostics."""
     return _status.copy()
 
-async def _run_agent_once(agent, symbol: str) -> bool:
-    key = f"{agent.name}:{symbol}"
+async def _run_agent_once(agent, symbol: str, insert: bool = True) -> bool:
+    """
+    Run a single agent once on the given symbol.
+    Persist finding into DB and in-memory buffer.
+    """
     try:
         finding = await agent.run_once(symbol)
-
-        # update status
-        _status.setdefault(agent.name, {})["status"]   = "ok"
-        _status[agent.name]["last_run"] = datetime.now(timezone.utc).isoformat()
-
-        if finding:
-            row = {
-                "agent":   agent.name,
-                "symbol":  symbol,
-                "score":   float(finding.get("score", 0.0)),
-                "label":   str(finding.get("label", agent.name)),
-                "details": finding.get("details") or {},
-            }
-            try:
-                await insert_finding_row(row)
-            except Exception:
-                # if DB hiccups, keep it visible for the dashboard
-                RECENT_FINDINGS.append({**row, "ts_utc": None})
-        return True
-
-    except Exception:
-        _status.setdefault(agent.name, {})["status"]   = "error"
-        _status[agent.name]["last_run"] = datetime.now(timezone.utc).isoformat()
+    except Exception as e:
+        print(f"Agent {agent.name} failed on {symbol}: {e}")
         return False
 
-    finally:
-        _last_run[key] = time.time()
-        try:
-            await heartbeat(agent.name, _status.get(agent.name, {}).get("status", "ok"))
-        except Exception:
-            pass
+    if not finding:
+        return False
+
+    # Build the row in the unified format
+    row = {
+        "agent": agent.name,
+        "symbol": symbol,
+        "score": float(finding.get("score", 0.0)),
+        "label": str(finding.get("label", agent.name)),
+        "details": finding.get("details") or {},
+    }
+
+    # Write to DB if requested
+    if insert:
+        await insert_finding_row(row)
+
+    # Always append to in-memory buffer for UI responsiveness
+    RECENT_FINDINGS.append({**row, "ts_utc": None})
+
+    return True
 
 async def agents_loop():
     """Cooperative scheduler. Ticks ~1s; runs agents at their configured cadences per symbol."""
