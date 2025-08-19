@@ -206,13 +206,13 @@ async def run_now(names: str, symbol: str, insert: bool = False):
         try:
             finding = await agent.run_once(symbol)
             if finding and insert:
-                await _maybe_await(insert_finding_row({
-                    "agent": agent.name,
+                await insert_finding_row({
+                    "agent": name,
                     "symbol": symbol,
-                    "score": float(finding.get("score", 0.0)),
-                    "label": finding.get("label", agent.name),
+                    "score": float(finding.get("score") or 0.0),
+                    "label": str(finding.get("label") or name),
                     "details": finding.get("details") or {},
-                }))
+                })
             out["ran"].append(agent.name)
             out["results"].append(
                 {"agent": agent.name, "finding": finding} if finding
