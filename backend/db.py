@@ -82,6 +82,10 @@ async def ensure_schema():
         CREATE INDEX IF NOT EXISTS idx_findings_symbol_ts ON findings(symbol, ts_utc DESC);
         """)
 
+# Backward-compat alias expected by app.py
+async def ensure_schema_v2():
+    await ensure_schema()
+
 # -------------------- Findings --------------------
 async def insert_finding_row(rec: Dict[str, Any]) -> int:
     """
@@ -219,3 +223,19 @@ async def refresh_return_views() -> None:
     except Exception:
         # Don't raise; scheduler should be resilient.
         pass
+
+# -------------------- Minimal posture & equity stubs --------------------
+_POSTURE: dict[str, dict] = {}
+_EQUITY: dict[str, list[dict]] = {}
+
+async def get_posture(symbol: str) -> dict:
+    return _POSTURE.get(symbol, {"symbol": symbol, "posture": "NO_POSITION", "size": 0, "price": None})
+
+async def set_posture(symbol: str, posture: str, size: float, price: Optional[float], reason: Optional[str] = None) -> None:
+    _POSTURE[symbol] = {"symbol": symbol, "posture": posture, "size": float(size), "price": price, "reason": reason, "ts_utc": datetime.now(timezone.utc).isoformat()}
+
+async def record_trade(symbol: str, side: str, qty: float, price: float) -> None:
+    _EQUITY.setdefault(symbol, []).append({"ts_utc": datetime.now(timezone.utc).isoformat(), "side": side, "qty": float(qty), "price": float(price)})
+
+async def equity_curve(symbol: str) -> dict:
+    return {"symbol": symbol, "equity": _EQUITY.get(symbol, [])}
