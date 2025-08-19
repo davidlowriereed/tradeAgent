@@ -30,14 +30,18 @@ _last_step: dict[str, dict] = {}
 
 @app.on_event("startup")
 async def _startup():
-   try:
-    await ensure_schema_v2()
-except ModuleNotFoundError as e:
-    if "asyncpg" in str(e):
-        print("[schema] Skipping ensure_schema_v2: install 'asyncpg' to enable migrations")
-    else:
+    # 1) Ensure DB schema (non-fatal if it can't run)
+    try:
+        await ensure_schema_v2()   # idempotent, safe
+    except ModuleNotFoundError as e:
+        if "asyncpg" in str(e):
+            print("[schema] Skipping ensure_schema_v2: install 'asyncpg' to enable migrations")
+        else:
+            print("[schema] ensure_schema_v2 failed:", e)
+    except Exception as e:
         print("[schema] ensure_schema_v2 failed:", e)
-    # kick off background agents loop
+
+    # 2) Kick off background agents loop (non-fatal if it can't start)
     try:
         asyncio.create_task(agents_loop())
     except Exception as e:
