@@ -1,71 +1,57 @@
+# backend/scheduler.py
 from __future__ import annotations
-import asyncio
-from typing import Dict, List
-from datetime import datetime, timezone
-
+import asyncio, time
+from typing import Dict, List, Any
 from .config import SYMBOLS
-from .db import insert_finding_row, heartbeat
+from .db import insert_finding_row
 from .state import RECENT_FINDINGS
 
-# --- Agents ---
-from .agents.rvol_spike import RvolSpikeAgent
-from .agents.cvd_divergence import CvdDivergenceAgent
+# Agents
+from .agents.rvol_spike import RVolSpikeAgent
+from .agents.cvd_divergence import CVDDivergenceAgent
 from .agents.trend_score import TrendScoreAgent
 from .agents.llm_analyst import LLMAnalystAgent
 
-# Construct agent objects with intervals pulled from env (fallbacks sane)
-AGENTS: List = [
-    RvolSpikeAgent(interval_sec=int(os.getenv("RVOL_INTERVAL", "30"))),
-    CvdDivergenceAgent(interval_sec=int(os.getenv("CVD_INTERVAL", "30"))),
-    TrendScoreAgent(interval_sec=int(os.getenv("TS_INTERVAL", "60"))),
-    LLMAnalystAgent(interval_sec=int(os.getenv("LLM_INTERVAL", "90"))),
+AGENTS = [
+    RVolSpikeAgent(interval_sec=10),
+    CVDDivergenceAgent(interval_sec=10),
+    TrendScoreAgent(interval_sec=15),
+    LLMAnalystAgent(interval_sec=30),
 ]
 
-# Internal state
-_last_run: Dict[str, float] = {}            # f"{agent}:{symbol}" -> epoch seconds
-_status:   Dict[str, Dict[str, str]] = {}   # agent -> {status,last_run}
+_last_run: Dict[str, Dict[str, Any]] = {}
 
-def list_agents_last_run() -> Dict[str, Dict[str, str]]:
-    """Used by /health for quick UI diagnostics."""
-    return _status.copy()
-
-async def _run_agent_once(agent, symbol: str, insert: bool = True) -> bool:
-    """
-    Run a single agent once on the given symbol.
-    Persist finding into DB and in-memory buffer.
-    """
-    try:
-        finding = await agent.run_once(symbol)
-    except Exception as e:
-        print(f"Agent {agent.name} failed on {symbol}: {e}")
-        return False
-
-    finding = await agent.run_once(symbol)
-        if finding:
-            row = {
-                "agent": agent.name,
-                "symbol": symbol,
-                "score": float(finding.get("score") or 0.0),
-                "label": str(finding.get("label") or agent.name),
-                "details": finding.get("details") or {},
-            }
-            if insert:  # run-now flag or scheduled inserts
-                await insert_finding_row(row)
-            RECENT_FINDINGS.append({**row, "ts_utc": None})
-
-    return True
-
+def list_agents_last_run() -> Dict[str, Dict[str, Any]]:
+    out = {}
+    for a in AGENTS:
+        out[a.name] = {"status":"ok", "last_run": _last_run.get(a.name, {}).get("last_run")}
+    return out
+    
 async def agents_loop():
-    """Cooperative scheduler. Ticks ~1s; runs agents at their configured cadences per symbol."""
-    TICK_SEC = 1.0
     while True:
-        started = time.time()
-        for agent in AGENTS:
-            for symbol in SYMBOLS:
-                key = f"{agent.name}:{symbol}"
-                last = _last_run.get(key, 0.0)
-                if time.time() - last >= getattr(agent, "interval_sec", 60):
-                    await _run_agent_once(agent, symbol)
-        # tiny, bounded idle between scans
-        elapsed = time.time() - started
-        await asyncio.sleep(max(TICK_SEC - elapsed, 0.0))
+        t0 = time.time()
+        for sym in SYMBOLS:
+            for agent in AGENTS:
+                try:
+                    finding = await agent.run_once(sym)
+                except Exception:
+                    finding = None
+                _last_run[agent.name] = {"last_run": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())}
+                if not finding:
+                    continue
+                payload = {
+                    "agent": agent.name,
+                    "symbol": sym,
+                    "score": float(finding.get("score") or 0.0),
+                    "label": str(finding.get("label") or agent.name),
+                    "details": finding.get("details") or {},
+                }
+                # Try DB, fall back to in-memory buffer
+                try:
+                    await insert_finding_row(payload)
+                except Exception:
+                    RECENT_FINDINGS.append(payload)
+                    if len(RECENT_FINDINGS) > 500:
+                        del RECENT_FINDINGS[:len(RECENT_FINDINGS)-500]
+        # pacing
+        await asyncio.sleep(max(1.0, 5.0 - (time.time()-t0)))
