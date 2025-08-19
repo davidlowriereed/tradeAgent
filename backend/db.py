@@ -87,30 +87,31 @@ async def ensure_schema_v2():
     await ensure_schema()
 
 # -------------------- Findings --------------------
-async def insert_finding_row(rec: Dict[str, Any]) -> int:
+async def insert_finding_row(row: dict) -> None:
     """
-    JSONB-safe insert used by agents/scheduler. Accepts dict/list/str for 'details'.
-    This resolves the 'expected str, got dict' error by using asyncpg.Json.
+    row = {agent, symbol, score, label, details, ts_utc?}
+    details may be dict or str; we always send JSON text and cast to jsonb.
     """
-    pool = await connect_pool()
+    ts = row.get("ts_utc")  # allow caller to pass ts_utc; else DB NOW()
+    details = row.get("details") or {}
+
+    # Always serialize; drivers are happiest with text here.
+    if not isinstance(details, str):
+        details = json.dumps(details, separators=(",", ":"))
+
+    sql = """
+        INSERT INTO findings (agent, symbol, ts_utc, score, label, details)
+        VALUES ($1, $2, COALESCE($3, NOW()), $4, $5, $6::jsonb)
+    """
     async with pool.acquire() as conn:
-        details_obj = rec.get("details") or {}
-        if not isinstance(details_obj, (dict, list)):
-            try:
-                details_obj = json.loads(str(details_obj))
-            except Exception:
-                details_obj = {"raw": str(details_obj)}
-        q = """
-            INSERT INTO findings (agent, symbol, score, label, details)
-            VALUES ($1,$2,$3,$4,$5)
-            RETURNING id
-        """
-        return await conn.fetchval(q,
-            str(rec.get("agent","")),
-            str(rec.get("symbol","")),
-            float(rec.get("score") or 0.0),
-            str(rec.get("label") or ""),
-            Json(details_obj) if Json else json.dumps(details_obj)
+        await conn.execute(
+            sql,
+            str(row["agent"]),
+            str(row["symbol"]),
+            ts,
+            float(row["score"]),
+            str(row["label"]),
+            details,
         )
 
 async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[dict]:
