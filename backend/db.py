@@ -4,6 +4,7 @@ import asyncio, json, os, ssl, base64
 from typing import Optional, Any, Dict
 from datetime import datetime, timezone
 import json
+import asyncpg
 
 from .config import DATABASE_URL
 from .state import RECENT_FINDINGS
@@ -13,6 +14,8 @@ HEARTBEATS: dict[str, dict] = {}
 async def heartbeat(name: str, status: str = "ok") -> None:
     HEARTBEATS[name] = {"status": status, "last_run": datetime.now(timezone.utc).isoformat()}
 heartbeats = HEARTBEATS  # compat alias
+
+_pool = None  # your global pool
 
 # ----- pool + error state -----
 POOL: Optional["asyncpg.pool.Pool"] = None
@@ -45,6 +48,29 @@ async def _make_pool(ssl_opt):
         ssl=ssl_opt,
         command_timeout=10,
     )
+
+async def fetch_findings(symbol: str, limit: int = 50):
+    q = """
+      SELECT ts_utc, agent, symbol, score, label, details
+      FROM findings
+      WHERE symbol = $1
+      ORDER BY ts_utc DESC
+      LIMIT $2
+    """
+    async with _pool.acquire() as conn:
+        recs = await conn.fetch(q, symbol, limit)
+    out = []
+    for r in recs:
+        out.append({
+            "ts_utc": r["ts_utc"].isoformat() if r["ts_utc"] else None,
+            "agent": r["agent"],
+            "symbol": r["symbol"],
+            "score": float(r["score"]),
+            "label": r["label"],
+            "details": r["details"],  # jsonb -> dict (asyncpg decodes); route layer normalizes
+        })
+    return out
+
 
 async def connect_pool():
     """Create asyncpg pool with best-effort TLS. Safe to call repeatedly."""
@@ -138,12 +164,37 @@ async def db_health() -> Dict[str, Any]:
         return {"ok": False, "mode": _tls_mode, "error": _last_db_error}
 
 
-async def insert_finding_row(row: dict) -> bool:
-    return await insert_finding_values(
-        row.get("symbol",""), row.get("agent",""),
-        float(row.get("score",0.0)), row.get("label",""),
-        row.get("details",{}), row.get("ts_utc")
-    )
+async def insert_finding_row(row: dict) -> None:
+    """
+    row = {agent, symbol, score, label, details(dict)}
+    Writes to Postgres if pool is ready; else appends to in-mem fallback.
+    """
+    if not _pool:
+        from .state import RECENT_FINDINGS
+        RECENT_FINDINGS.append({
+            "ts_utc": None,
+            "agent": row.get("agent"),
+            "symbol": row.get("symbol"),
+            "score": row.get("score"),
+            "label": row.get("label"),
+            "details": row.get("details") or {},
+        })
+        return
+
+    q = """
+      INSERT INTO findings(agent, symbol, score, label, details)
+      VALUES($1, $2, $3, $4, $5::jsonb)
+    """
+    details_text = json.dumps(row.get("details") or {})
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            q,
+            str(row.get("agent") or ""),
+            str(row.get("symbol") or ""),
+            float(row.get("score") or 0.0),
+            str(row.get("label") or ""),
+            details_text,  # <-- TEXT here; SQL casts to jsonb
+        )
 
 async def fetch_recent_findings(symbol: Optional[str], limit: int = 20):
     """Return newest rows from DB when available; else fall back to in-mem buffer."""
