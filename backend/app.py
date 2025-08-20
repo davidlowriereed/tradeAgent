@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse, FileResponse
 
 from .config import SYMBOLS
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
@@ -27,6 +28,11 @@ app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 _last_step: dict[str, dict] = {}
+
+@app.get("/")
+def root():
+    # If your dashboard is at backend/static/index.html
+    return RedirectResponse(url="/static/index.html")
 
 @app.on_event("startup")
 async def _startup():
