@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio, os, time, importlib
+from .agents import REGISTRY
 from typing import Dict, Optional
 from datetime import datetime, timezone
 
 TICK_SEC = int(os.getenv("SCHED_TICK_SEC", "5"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").split(",") if s.strip()]
+
+AGENT_NAMES = os.getenv("AGENTS", "momentum,rvol").split(",")
+AGENTS = [REGISTRY[name.strip()] for name in AGENT_NAMES if name.strip() in REGISTRY]
 
 # Import only functions that are guaranteed to exist
 from .db import insert_finding_row, heartbeat, refresh_return_views, insert_features_1m
