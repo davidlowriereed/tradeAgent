@@ -49,6 +49,15 @@ async def db_health_route():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+@app.get("/")
+async def root():
+    st = boot.state if boot else None
+    return {
+        "status": "up",
+        "ready": bool(boot and boot.ready),
+        "stage": st.stage.value if st else "BOOTING",
+    }
+
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
     rows = await fetch_recent_findings(symbol, limit)
