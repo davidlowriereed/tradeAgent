@@ -92,7 +92,8 @@ def resolve_agents(agents):
     # Otherwise assume these are agent objects with .name
     return {a.name: a for a in agents}
 
-AGENT_BY_NAME = resolve_agents(AGENTS)
+AGENTS = resolve_agents(<your list from env or defaults>)
+AGENT_BY_NAME = {a.name: a for a in AGENTS}
 
 @app.post("/agents/run-now")
 async def run_now(names: str, symbol: str, insert: bool = False):
