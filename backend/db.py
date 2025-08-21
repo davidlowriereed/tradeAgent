@@ -53,12 +53,15 @@ async def connect_pool():
             return _POOL
         if asyncpg is None:
             raise RuntimeError("asyncpg not installed")
-        _POOL = await asyncpg.create_pool(dsn=_dsn(), ssl=_ssl_ctx(), timeout=DB_CONNECT_TIMEOUT_SEC, command_timeout=DB_CONNECT_TIMEOUT_SEC, min_size=1, max_size=5),                         # <-- fix call
-            ssl=_ssl_ctx(),
-            timeout=DB_CONNECT_TIMEOUT_SEC,
-            command_timeout=DB_CONNECT_TIMEOUT_SEC,
-            min_size=1, max_size=5,
+        _POOL = await asyncpg.create_pool(
+            dsn=_dsn(), 
+            ssl=_ssl_ctx(), 
+            timeout=DB_CONNECT_TIMEOUT_SEC, 
+            command_timeout=DB_CONNECT_TIMEOUT_SEC, 
+            min_size=1, 
+            max_size=5),
         )
+          
         # DO NOT run ensure_schema() here (boot orchestrator will)
         return _POOL
 
