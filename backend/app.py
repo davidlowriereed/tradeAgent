@@ -1,11 +1,9 @@
 # backend/app.py
-from .db import (
-    db_health as db_status, connect_pool, insert_finding_row, fetch_recent_findings,
-    get_posture, set_posture, record_trade, equity_curve, run_migrations_idempotent 
-)
 
+# backend/app.py
 from __future__ import annotations
-import os, json, time, asyncio
+
+import os, json, asyncio
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Body
@@ -13,9 +11,16 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import SYMBOLS
-from .scheduler import list_agents_last_run, AGENTS
+from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .boot import BootOrchestrator, Stage
-from .state import RECENT_FINDINGS
+from .db import (
+    db_health as db_status,
+    connect_pool,
+    insert_finding_row,
+    fetch_recent_findings,
+    get_posture, set_posture, record_trade, equity_curve,
+    run_migrations_idempotent,   # <-- add this import
+)
 
 app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
 
@@ -23,9 +28,6 @@ boot: BootOrchestrator | None = None
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 _last_step = {}
-
-from .db import ensure_schema_v2
-from .scheduler import agents_loop
 
 @app.on_event("startup")
 async def _startup():
