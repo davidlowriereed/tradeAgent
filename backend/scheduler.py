@@ -1,6 +1,7 @@
 # backend/scheduler.py
-from __future__ import annotations
 
+from __future__ import annotations
+from .agents import REGISTRY
 import asyncio, os, time, importlib
 from .agents import REGISTRY
 from typing import Dict, Optional
@@ -19,6 +20,23 @@ from .signals import compute_signals_tf
 # -----------------------------------------------------------------------------
 # Agent discovery — tolerate class name drift across modules
 # -----------------------------------------------------------------------------
+def resolve_agents(spec):
+    """
+    spec can be:
+      - list of short-name strings (e.g. ["trend_score", "opening_drive"])
+      - list of classes
+      - list of already-instantiated agents
+    """
+    out = []
+    for item in spec:
+        if isinstance(item, str):
+            out.append(REGISTRY[item]())
+        elif isinstance(item, type):
+            out.append(item())              # it’s a class
+        else:
+            out.append(item)                # assume instance
+    return out
+
 def _load_agent(module: str, *class_names: str):
     try:
         mod = importlib.import_module(f"{__package__}.agents.{module}")
