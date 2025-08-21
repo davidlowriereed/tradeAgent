@@ -71,8 +71,7 @@ async def findings(symbol: Optional[str] = None, limit: int = 20):
                 except: f["details"] = {"raw": f["details"]}
     return {"findings": rows}
 
-AGENT_BY_NAME = AGENTS
-# AGENT_BY_NAME = {a.name: a for a in AGENTS}
+AGENT_BY_NAME = {a.name: a for a in AGENTS}
 
 @app.post("/agents/run-now")
 async def run_now(names: str, symbol: str, insert: bool = False):
