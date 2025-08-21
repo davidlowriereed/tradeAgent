@@ -1,6 +1,4 @@
 # backend/app.py
-
-# backend/app.py
 from __future__ import annotations
 
 import os, json, asyncio
@@ -13,14 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from .config import SYMBOLS
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .boot import BootOrchestrator, Stage
-from .db import (
-    db_health as db_status,
-    connect_pool,
-    insert_finding_row,
-    fetch_recent_findings,
-    get_posture, set_posture, record_trade, equity_curve,
-    run_migrations_idempotent,   # <-- add this import
-)
+from .db import run_migrations_idempotent
+
 
 app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
 
