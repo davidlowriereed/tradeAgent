@@ -1,12 +1,10 @@
 # backend/db.py
 from __future__ import annotations
-import asyncio, json, os, ssl, base64   # <-- add base64
-from typing import Optional
+import asyncio, json, os, ssl, base64
+from typing import Optional, Dict, Any
 
 DB_CONNECT_TIMEOUT_SEC = float(os.getenv('DB_CONNECT_TIMEOUT_SEC', '5'))
-MIGRATIONS_LOCK_KEY = 2147483601
-
-from datetime import datetime, timezone
+MIGRATIONS_LOCK_KEY = 2147483601from datetime import datetime, timezone
 
 try:
     import asyncpg  # type: ignore
@@ -25,24 +23,6 @@ heartbeats = HEARTBEATS  # compat alias
 _POOL: Optional["asyncpg.pool.Pool"] = None
 _LOCK = asyncio.Lock()
 
-async def insert_features_1m(symbol: str, ts_utc, tf: dict) -> None:
-    sql = """
-        INSERT INTO features_1m
-          (symbol, ts_utc,
-           mom_bps_1m, mom_bps_5m, mom_bps_15m,
-           px_vs_vwap_bps_1m, px_vs_vwap_bps_5m, px_vs_vwap_bps_15m,
-           rvol_1m, atr_1m)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        ON CONFLICT (symbol, ts_utc) DO NOTHING
-    """
-    vals = (
-        symbol, ts_utc,
-        tf.get("mom_bps_1m"), tf.get("mom_bps_5m"), tf.get("mom_bps_15m"),
-        tf.get("px_vs_vwap_bps_1m"), tf.get("px_vs_vwap_bps_5m"), tf.get("px_vs_vwap_bps_15m"),
-        tf.get("rvol_1m"), tf.get("atr_1m"),
-    )
-    async with pool.acquire() as conn:
-        await conn.execute(sql, *vals)
 
 def _dsn() -> str:
     url = os.getenv("DATABASE_URL", "").strip()
@@ -71,8 +51,7 @@ async def connect_pool():
             return _POOL
         if asyncpg is None:
             raise RuntimeError("asyncpg not installed")
-        _POOL = await asyncpg.create_pool(
-            dsn=_dsn(),                         # <-- fix call
+        _POOL = await asyncpg.create_pool(dsn=_dsn(), ssl=_ssl_ctx(), timeout=DB_CONNECT_TIMEOUT_SEC, command_timeout=DB_CONNECT_TIMEOUT_SEC, min_size=1, max_size=5),                         # <-- fix call
             ssl=_ssl_ctx(),
             timeout=DB_CONNECT_TIMEOUT_SEC,
             command_timeout=DB_CONNECT_TIMEOUT_SEC,
@@ -113,9 +92,7 @@ async def ensure_schema():
 
 # Backward-compat alias expected by app.py
 async def ensure_schema_v2():
-    await ensure_schema()
-
-# -------------------- Findings --------------------
+    # -------------------- Findings --------------------
 async def insert_finding_row(row: dict) -> None:
     ts = row.get("ts_utc")
     details = row.get("details") or {}
@@ -261,6 +238,5 @@ async def run_migrations_idempotent():
     async with pool.acquire() as conn:
         await conn.execute("SELECT pg_advisory_lock($1);", MIGRATIONS_LOCK_KEY)
         try:
-            await ensure_schema()
-        finally:
+            finally:
             await conn.execute("SELECT pg_advisory_unlock($1);", MIGRATIONS_LOCK_KEY)
