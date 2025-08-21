@@ -1,9 +1,11 @@
 # backend/db.py
 from __future__ import annotations
-import asyncio, json, os, ssl
+import asyncio, json, os, ssl, base64   # <-- add base64
+from typing import Optional
+
 DB_CONNECT_TIMEOUT_SEC = float(os.getenv('DB_CONNECT_TIMEOUT_SEC', '5'))
-MIGRATIONS_LOCK_KEY = 2147483601, base64
-from typing import Optional, Dict, Any
+MIGRATIONS_LOCK_KEY = 2147483601
+
 from datetime import datetime, timezone
 
 try:
@@ -69,8 +71,14 @@ async def connect_pool():
             return _POOL
         if asyncpg is None:
             raise RuntimeError("asyncpg not installed")
-        _POOL = await asyncpg.create_pool(dsn=_dsn(, timeout=DB_CONNECT_TIMEOUT_SEC, command_timeout=DB_CONNECT_TIMEOUT_SEC, min_size=1, max_size=5), ssl=_ssl_ctx())
-        await ensure_schema()
+        _POOL = await asyncpg.create_pool(
+            dsn=_dsn(),                         # <-- fix call
+            ssl=_ssl_ctx(),
+            timeout=DB_CONNECT_TIMEOUT_SEC,
+            command_timeout=DB_CONNECT_TIMEOUT_SEC,
+            min_size=1, max_size=5,
+        )
+        # DO NOT run ensure_schema() here (boot orchestrator will)
         return _POOL
 
 # -------------------- Health --------------------
@@ -109,30 +117,19 @@ async def ensure_schema_v2():
 
 # -------------------- Findings --------------------
 async def insert_finding_row(row: dict) -> None:
-    """
-    row = {agent, symbol, score, label, details, ts_utc?}
-    details may be dict or str; we always send JSON text and cast to jsonb.
-    """
-    ts = row.get("ts_utc")  # allow caller to pass ts_utc; else DB NOW()
+    ts = row.get("ts_utc")
     details = row.get("details") or {}
-
-    # Always serialize; drivers are happiest with text here.
     if not isinstance(details, str):
         details = json.dumps(details, separators=(",", ":"))
-
-    sql = """
-        INSERT INTO findings (agent, symbol, ts_utc, score, label, details)
-        VALUES ($1, $2, COALESCE($3, NOW()), $4, $5, $6::jsonb)
-    """
+    pool = await connect_pool()                 # <-- ensure pool defined here
     async with pool.acquire() as conn:
         await conn.execute(
-            sql,
-            str(row["agent"]),
-            str(row["symbol"]),
-            ts,
-            float(row["score"]),
-            str(row["label"]),
-            details,
+            """
+            INSERT INTO findings (agent, symbol, ts_utc, score, label, details)
+            VALUES ($1, $2, COALESCE($3, NOW()), $4, $5, $6::jsonb)
+            """,
+            str(row["agent"]), str(row["symbol"]), ts, float(row["score"]),
+            str(row["label"]), details,
         )
 
 async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[dict]:
@@ -208,9 +205,6 @@ async def insert_bar_1m(symbol: str, ts_utc, *args, **kwargs) -> bool:
 
 # -------------------- Features (1m snapshot) --------------------
 async def insert_features_1m(symbol: str, ts_utc, feat: dict) -> bool:
-    """
-    Upsert 1m features snapshot (dict-based API). Columns kept minimal to avoid schema drift.
-    """
     pool = await connect_pool()
     cols = [
         "mom_bps_1m","mom_bps_5m","mom_bps_15m",
