@@ -2,11 +2,10 @@
 from __future__ import annotations
 import asyncio, json, os, ssl, base64
 from typing import Optional, Dict, Any
+from datetime import datetime, timezone
 
 DB_CONNECT_TIMEOUT_SEC = float(os.getenv('DB_CONNECT_TIMEOUT_SEC', '5'))
-MIGRATIONS_LOCK_KEY = 2147483601
-
-from datetime import datetime, timezone
+MIGRATIONS_LOCK_KEY = 2147483601  # integer advisory-lock key
 
 try:
     import asyncpg  # type: ignore
@@ -21,19 +20,10 @@ async def heartbeat(name: str, status: str = "ok") -> None:
     HEARTBEATS[name] = {"status": status, "last_run": datetime.now(timezone.utc).isoformat()}
 heartbeats = HEARTBEATS  # compat alias
 
-# -------------------- Pool --------------------
-_POOL: Optional["asyncpg.pool.Pool"] = None
-_LOCK = asyncio.Lock()
-
-
-def _dsn() -> str:
-    url = os.getenv("DATABASE_URL", "").strip()
-    if not url:
-        raise RuntimeError("DATABASE_URL not set")
-    return url
-
+# ---------- TLS context ----------
 def _ssl_ctx():
-    if os.getenv("DB_TLS_INSECURE", "0").lower() in ("1","true","yes"):
+    # For quick testing only: DB_TLS_INSECURE=1 to skip verification
+    if os.getenv("DB_TLS_INSECURE", "0").lower() in ("1", "true", "yes"):
         return False
     ca_b64 = os.getenv("DATABASE_CA_CERT_B64")
     ca_pem = os.getenv("DATABASE_CA_CERT")
@@ -44,23 +34,35 @@ def _ssl_ctx():
         return ctx
     return ssl.create_default_context()
 
-async def connect_pool() -> "asyncpg.pool.Pool":
+_POOL: Optional["asyncpg.pool.Pool"] = None
+_LOCK = asyncio.Lock()
+
+# ---------- Pool ----------
+async def connect_pool():
     global _POOL
+    if _POOL is not None:
+        return _POOL
     async with _LOCK:
         if _POOL is not None:
             return _POOL
         if asyncpg is None:
             raise RuntimeError("asyncpg not installed")
         _POOL = await asyncpg.create_pool(
-            dsn=_dsn(),
+            dsn=_dsn(),                      # <- your existing DSN builder
             ssl=_ssl_ctx(),
             timeout=DB_CONNECT_TIMEOUT_SEC,
             command_timeout=DB_CONNECT_TIMEOUT_SEC,
             min_size=1,
             max_size=5,
         )
+        # DO NOT call ensure_schema() here; boot orchestrator runs migrations.
         return _POOL
-
+        
+def _dsn() -> str:
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        raise RuntimeError("DATABASE_URL not set")
+    return url
 
 # -------------------- Health --------------------
 async def db_health():
@@ -93,7 +95,7 @@ async def ensure_schema():
         """)
 
 # Backward-compat alias expected by app.py
-async def ensure_schema_v2():
+# async def ensure_schema_v2():
     # -------------------- Findings --------------------
 async def insert_finding_row(row: dict) -> None:
     ts = row.get("ts_utc")
@@ -235,12 +237,12 @@ async def record_trade(symbol: str, side: str, qty: float, price: float) -> None
 async def equity_curve(symbol: str) -> dict:
     return {"symbol": symbol, "equity": _EQUITY.get(symbol, [])}
 
+# ---------- Migrations (idempotent, single-run) ----------
 async def run_migrations_idempotent():
     pool = await connect_pool()
     async with pool.acquire() as conn:
         await conn.execute("SELECT pg_advisory_lock($1);", MIGRATIONS_LOCK_KEY)
         try:
-            # put idempotent DDL/DML here
-            pass
+            await ensure_schema()  # keep your existing schema builder here
         finally:
             await conn.execute("SELECT pg_advisory_unlock($1);", MIGRATIONS_LOCK_KEY)
