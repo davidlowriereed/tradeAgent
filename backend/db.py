@@ -4,7 +4,9 @@ import asyncio, json, os, ssl, base64
 from typing import Optional, Dict, Any
 
 DB_CONNECT_TIMEOUT_SEC = float(os.getenv('DB_CONNECT_TIMEOUT_SEC', '5'))
-MIGRATIONS_LOCK_KEY = 2147483601from datetime import datetime, timezone
+MIGRATIONS_LOCK_KEY = 2147483601
+
+from datetime import datetime, timezone
 
 try:
     import asyncpg  # type: ignore
