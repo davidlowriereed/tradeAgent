@@ -13,6 +13,8 @@ from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .boot import BootOrchestrator, Stage
 from .db import run_migrations_idempotent
 
+from .scheduler import AGENTS
+from .agents import REGISTRY
 
 app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
 
@@ -71,7 +73,26 @@ async def findings(symbol: Optional[str] = None, limit: int = 20):
                 except: f["details"] = {"raw": f["details"]}
     return {"findings": rows}
 
-AGENT_BY_NAME = {a.name: a for a in AGENTS}
+def resolve_agents(agents):
+    # If we already have a mapping name -> agent, just use it
+    if isinstance(agents, dict):
+        return agents
+
+    # If we got a list/tuple of strings, map them through the registry
+    if isinstance(agents, (list, tuple)) and all(isinstance(a, str) for a in agents):
+        names = [n.strip() for n in agents if n and n.strip()]
+        missing = [n for n in names if n not in REGISTRY]
+        if missing:
+            raise RuntimeError(
+                f"Unknown agent names: {missing}. "
+                f"Known agents: {sorted(REGISTRY.keys())}"
+            )
+        return {n: REGISTRY[n] for n in names}
+
+    # Otherwise assume these are agent objects with .name
+    return {a.name: a for a in agents}
+
+AGENT_BY_NAME = resolve_agents(AGENTS)
 
 @app.post("/agents/run-now")
 async def run_now(names: str, symbol: str, insert: bool = False):
