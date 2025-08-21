@@ -12,7 +12,7 @@ SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").spl
 
 
 from datetime import datetime, timezone
-from .signals import compute_signals_tf, compute_signals
+from .signals import compute_signals_tf
 from .db import insert_features_1m
 
 _last_feat_min: dict[str, str] = {}  # "SYMBOL:YYYY-MM-DDTHH:MM" -> True
@@ -128,7 +128,7 @@ async def agents_loop():
     """
     import time
     from datetime import datetime, timezone
-    from .signals import compute_signals_tf, compute_signals
+    from .signals import compute_signals_tf
     from .db import insert_features_1m, refresh_return_views, heartbeat
 
     global _LAST_RUN, _last_feat_min, _view_refresh_counter
@@ -193,3 +193,64 @@ async def agents_loop():
         elapsed = time.time() - loop_start
         await asyncio.sleep(max(0.0, TICK_SEC - elapsed))
 
+
+async def agents_tick_once():
+    global _LAST_RUN
+    global _view_refresh_counter
+    loop_start = time.time()
+    for symbol in SYMBOLS:
+        try:
+            await flush_minute(symbol)
+        except Exception:
+            pass
+        try:
+            tf = await compute_signals_tf(symbol)
+            if tf:
+                now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+                await insert_features_1m(symbol, now, tf)
+        except Exception:
+            pass
+        try:
+            sig = await compute_signals(symbol)
+            px = sig.get("last_price") if isinstance(sig, dict) else None
+            if px:
+                now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+                await insert_bar_1m_stitched(symbol, now, float(px), sig.get("vwap"), None)
+        except Exception:
+            pass
+        for name, agent in AGENTS.items():
+            try:
+                await run_agent_once(agent, symbol, insert=True)
+                _LAST_RUN[name] = time.time()
+            except Exception:
+                pass
+    try:
+        await heartbeat("scheduler")
+    except Exception:
+        pass
+    try:
+        _view_refresh_counter = (_view_refresh_counter + 1) % 12
+        if _view_refresh_counter == 0:
+            await refresh_return_views()
+    except Exception:
+        pass
+
+async def _agents_forever():
+    while True:
+        try:
+            await agents_tick_once()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        await asyncio.sleep(TICK_SEC)
+
+async def agents_loop():
+    backoff = 1.0
+    while True:
+        try:
+            await _agents_forever()
+        except Exception:
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+        else:
+            backoff = 1.0
