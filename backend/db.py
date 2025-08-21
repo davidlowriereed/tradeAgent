@@ -95,7 +95,9 @@ async def ensure_schema():
         """)
 
 # Backward-compat alias expected by app.py
-# async def ensure_schema_v2():
+async def ensure_schema_v2():
+    await ensure_schema()
+    
     # -------------------- Findings --------------------
 async def insert_finding_row(row: dict) -> None:
     ts = row.get("ts_utc")
