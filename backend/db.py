@@ -1,23 +1,17 @@
 # backend/db.py
 from __future__ import annotations
-import asyncio, json, os, ssl, base64
+import asyncio, json, os, ssl
+DB_CONNECT_TIMEOUT_SEC = float(os.getenv('DB_CONNECT_TIMEOUT_SEC', '5'))
+MIGRATIONS_LOCK_KEY = 2147483601, base64
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
-# Import asyncpg; only treat a missing package as "not installed"
 try:
     import asyncpg  # type: ignore
-except ModuleNotFoundError:
-    asyncpg = None  # truly not installed
-
-# 'Json' helper is optional and has moved across versions; don't fail if missing
-try:
-    from asyncpg.types import Json  # optional
+    from asyncpg.types import Json
 except Exception:
-    # Minimal fallback so references won't break if you ever use Json
-    class Json:  # type: ignore
-        def __init__(self, obj): self.obj = obj
-
+    asyncpg = None
+    Json = None
 
 # -------------------- Heartbeat --------------------
 HEARTBEATS: dict[str, dict] = {}
@@ -75,7 +69,7 @@ async def connect_pool():
             return _POOL
         if asyncpg is None:
             raise RuntimeError("asyncpg not installed")
-        _POOL = await asyncpg.create_pool(dsn=_dsn(), ssl=_ssl_ctx())
+        _POOL = await asyncpg.create_pool(dsn=_dsn(, timeout=DB_CONNECT_TIMEOUT_SEC, command_timeout=DB_CONNECT_TIMEOUT_SEC, min_size=1, max_size=5), ssl=_ssl_ctx())
         await ensure_schema()
         return _POOL
 
@@ -114,22 +108,33 @@ async def ensure_schema_v2():
     await ensure_schema()
 
 # -------------------- Findings --------------------
-async def insert_finding_row(row: dict):
-    sql = """
-        INSERT INTO findings (agent, symbol, score, label, details)
-        VALUES ($1,$2,$3,$4, COALESCE($5::jsonb, '{}'::jsonb))
+async def insert_finding_row(row: dict) -> None:
     """
-    details_json = json.dumps(row.get("details") or {})
+    row = {agent, symbol, score, label, details, ts_utc?}
+    details may be dict or str; we always send JSON text and cast to jsonb.
+    """
+    ts = row.get("ts_utc")  # allow caller to pass ts_utc; else DB NOW()
+    details = row.get("details") or {}
+
+    # Always serialize; drivers are happiest with text here.
+    if not isinstance(details, str):
+        details = json.dumps(details, separators=(",", ":"))
+
+    sql = """
+        INSERT INTO findings (agent, symbol, ts_utc, score, label, details)
+        VALUES ($1, $2, COALESCE($3, NOW()), $4, $5, $6::jsonb)
+    """
     async with pool.acquire() as conn:
         await conn.execute(
             sql,
-            str(row.get("agent") or ""),
-            str(row.get("symbol") or ""),
-            float(row.get("score") or 0.0),
-            str(row.get("label") or ""),
-            details_json,
+            str(row["agent"]),
+            str(row["symbol"]),
+            ts,
+            float(row["score"]),
+            str(row["label"]),
+            details,
         )
-        
+
 async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[dict]:
     """Read latest findings (jsonb 'details' comes back as a dict from asyncpg)."""
     pool = await connect_pool()
@@ -164,24 +169,6 @@ async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[
     return out
 
 # -------------------- Bars (1m) --------------------
-
-# -------------------- Bars (1m) — stitched last trade (option 3a) --------------------
-async def insert_bar_1m_stitched(symbol: str, ts_utc, price: float, vwap: float|None=None, trades: int|None=None):
-    """
-    Quick & dirty: write a bar each minute using 'price' for o/h/l/c and 0 volume.
-    DO NOTHING on conflict so repeated calls in the same minute are safe.
-    """
-    pool = await connect_pool()
-    sql = """
-        INSERT INTO bars_1m (symbol, ts_utc, o,h,l,c,v,vwap,trades)
-        VALUES ($1,$2,$3,$3,$3,$3,0,$4,$5)
-        ON CONFLICT (symbol, ts_utc) DO NOTHING
-    """
-    async with pool.acquire() as conn:
-        await conn.execute(sql, symbol, ts_utc, float(price),
-                           None if vwap is None else float(vwap),
-                           None if trades is None else int(trades))
-
 async def insert_bar_1m(symbol: str, ts_utc, *args, **kwargs) -> bool:
     """
     Upsert a 1m bar.
@@ -274,3 +261,12 @@ async def record_trade(symbol: str, side: str, qty: float, price: float) -> None
 
 async def equity_curve(symbol: str) -> dict:
     return {"symbol": symbol, "equity": _EQUITY.get(symbol, [])}
+
+async def run_migrations_idempotent():
+    pool = await connect_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("SELECT pg_advisory_lock($1);", MIGRATIONS_LOCK_KEY)
+        try:
+            await ensure_schema()
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1);", MIGRATIONS_LOCK_KEY)
