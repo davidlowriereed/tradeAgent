@@ -44,22 +44,23 @@ def _ssl_ctx():
         return ctx
     return ssl.create_default_context()
 
-# inside connect_pool()
-async with _LOCK:
-    if _POOL is not None:
+async def connect_pool() -> "asyncpg.pool.Pool":
+    global _POOL
+    async with _LOCK:
+        if _POOL is not None:
+            return _POOL
+        if asyncpg is None:
+            raise RuntimeError("asyncpg not installed")
+        _POOL = await asyncpg.create_pool(
+            dsn=_dsn(),
+            ssl=_ssl_ctx(),
+            timeout=DB_CONNECT_TIMEOUT_SEC,
+            command_timeout=DB_CONNECT_TIMEOUT_SEC,
+            min_size=1,
+            max_size=5,
+        )
         return _POOL
-    if asyncpg is None:
-        raise RuntimeError("asyncpg not installed")
-    _POOL = await asyncpg.create_pool(
-        dsn=_dsn(),
-        ssl=_ssl_ctx(),
-        timeout=DB_CONNECT_TIMEOUT_SEC,
-        command_timeout=DB_CONNECT_TIMEOUT_SEC,
-        min_size=1,
-        max_size=5,
-    )
-    # DO NOT run ensure_schema() here (boot orchestrator will)
-    return _POOL
+
 
 # -------------------- Health --------------------
 async def db_health():
