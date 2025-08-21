@@ -38,16 +38,6 @@ async def _startup():
     )
     import asyncio as _asyncio
     _asyncio.create_task(boot.run())
-@app.get("/health")
-async def health():
-    return {"status": "up"}
-@app.get("/db-health")
-async def db_health_route():
-    try:
-        res = await db_status()
-        return res if isinstance(res, dict) else {"ok": bool(res)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 @app.get("/")
 async def root():
@@ -57,6 +47,18 @@ async def root():
         "ready": bool(boot and boot.ready),
         "stage": st.stage.value if st else "BOOTING",
     }
+    
+@app.get("/health")
+async def health():
+    return {"status": "up"}
+    
+@app.get("/db-health")
+async def db_health_route():
+    try:
+        res = await db_status()
+        return res if isinstance(res, dict) else {"ok": bool(res)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
