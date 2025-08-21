@@ -3,55 +3,19 @@ from __future__ import annotations
 
 import asyncio, os, time, importlib
 from typing import Dict, Optional
-
-# Only import the helpers that actually exist in your db.py
-from .db import insert_finding_row, heartbeat  # JSONB-safe insert, heartbeat
+from datetime import datetime, timezone
 
 TICK_SEC = int(os.getenv("SCHED_TICK_SEC", "5"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOL", "BTC-USD,ETH-USD,ADA-USD").split(",") if s.strip()]
 
-
-from datetime import datetime, timezone
+# Import only functions that are guaranteed to exist
+from .db import insert_finding_row, heartbeat, refresh_return_views, insert_features_1m
 from .signals import compute_signals_tf
-from .db import insert_features_1m
-
-_last_feat_min: dict[str, str] = {}  # "SYMBOL:YYYY-MM-DDTHH:MM" -> True
-
-
-async def _flush_features_minute(symbol: str):
-    """Write a features_1m snapshot once per minute per symbol."""
-    tf = await compute_signals_tf(symbol)  # async by your prior contract
-    ts_min = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    key = f"{symbol}:{ts_min.isoformat(timespec='minutes')}"
-    if _last_feat_min.get(key):
-        return
-    feat_rec = {
-        "mom_bps_1m":         tf.get("mom_bps_1m"),
-        "mom_bps_5m":         tf.get("mom_bps_5m"),
-        "mom_bps_15m":        tf.get("mom_bps_15m"),
-        "px_vs_vwap_bps_1m":  tf.get("px_vs_vwap_bps_1m"),
-        "px_vs_vwap_bps_5m":  tf.get("px_vs_vwap_bps_5m"),
-        "px_vs_vwap_bps_15m": tf.get("px_vs_vwap_bps_15m"),
-        "rvol_1m":            tf.get("rvol_1m"),
-        "atr_1m":             tf.get("atr_1m"),
-        "schema_version":     1,
-    }
-    try:
-        await insert_features_1m(symbol, ts_min, feat_rec)
-        _last_feat_min[key] = True
-    except Exception as e:
-        # keep loop healthy; you'll still see errors in logs
-        pass
 
 # -----------------------------------------------------------------------------
-# Resilient agent loader — tolerates class name changes
+# Agent discovery — tolerate class name drift across modules
 # -----------------------------------------------------------------------------
 def _load_agent(module: str, *class_names: str):
-    """
-    Try importing an agent class from backend.agents.<module>.
-    Accept multiple possible class names (handles repo drift).
-    Returns an instance or None.
-    """
     try:
         mod = importlib.import_module(f"{__package__}.agents.{module}")
     except Exception:
@@ -66,7 +30,6 @@ def _load_agent(module: str, *class_names: str):
     return None
 
 def build_agents() -> Dict[str, object]:
-    # Try common variants per agent
     candidates = [
         ("rvol_spike",    ("RVolSpikeAgent", "RVolSpike")),
         ("cvd_divergence",("CVDDivergenceAgent","CvdDivergenceAgent","CvdDivergence")),
@@ -81,14 +44,14 @@ def build_agents() -> Dict[str, object]:
     return out
 
 AGENTS: Dict[str, object] = build_agents()
-_LAST_RUN: Dict[str, float] = {}  # agent_name -> epoch seconds of last success
+_LAST_RUN: Dict[str, float] = {}   # agent_name -> epoch seconds of last success
+_last_feat_min: dict[str, bool] = {}  # f"{symbol}:{YYYY-MM-DDTHH:MM}" -> True
+_view_refresh_counter: int = 0
 
 def list_agents_last_run() -> Dict[str, Optional[str]]:
-    """Return a simple map for /health to render last-run stamps."""
     res = {}
     for name, ts in _LAST_RUN.items():
         try:
-            # return ISO8601-ish seconds since process start to mark “ok”
             res[name] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)) + "Z"
         except Exception:
             res[name] = None
@@ -98,11 +61,6 @@ def list_agents_last_run() -> Dict[str, Optional[str]]:
 # Uniform agent execution
 # -----------------------------------------------------------------------------
 async def run_agent_once(agent, symbol: str, insert: bool = True) -> Optional[dict]:
-    """
-    Agent contract: async run_once(symbol) -> Optional[dict] with keys:
-      score: float, label: str, details: dict
-    If a finding is returned and insert=True, persist via insert_finding_row (JSONB-safe).
-    """
     finding = await agent.run_once(symbol)
     if finding and insert:
         rec = {
@@ -110,33 +68,44 @@ async def run_agent_once(agent, symbol: str, insert: bool = True) -> Optional[di
             "symbol": symbol,
             "score": float(finding.get("score", 0.0)),
             "label": str(finding.get("label", "")),
-            "details": finding.get("details", {}),  # dict → JSONB via db helper
+            "details": finding.get("details", {}),
         }
         await insert_finding_row(rec)
     return finding
 
 # -----------------------------------------------------------------------------
-# Background loop
+# Internal helpers
 # -----------------------------------------------------------------------------
-async def agents_loop():
-    """
-    Main scheduler loop:
-      - runs each agent per symbol
-      - heartbeats for liveness
-      - once-per-minute feature snapshot into features_1m
-      - low-frequency refresh of forward-return views
-    """
-    import time
-    from datetime import datetime, timezone
-    from .signals import compute_signals_tf
-    from .db import insert_features_1m, refresh_return_views, heartbeat
+async def _maybe_write_features(symbol: str):
+    """Write a features_1m snapshot once per minute per symbol (conflict-safe upsert in db.py)."""
+    ts_min = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    key = f"{symbol}:{ts_min.isoformat(timespec='minutes')}"
+    if _last_feat_min.get(key):
+        return
+    tf = await compute_signals_tf(symbol)  # should be async and never raise on empty
+    feat = {
+        "mom_bps_1m":         tf.get("mom_bps_1m"),
+        "mom_bps_5m":         tf.get("mom_bps_5m"),
+        "mom_bps_15m":        tf.get("mom_bps_15m"),
+        "px_vs_vwap_bps_1m":  tf.get("px_vs_vwap_bps_1m"),
+        "px_vs_vwap_bps_5m":  tf.get("px_vs_vwap_bps_5m"),
+        "px_vs_vwap_bps_15m": tf.get("px_vs_vwap_bps_15m"),
+        "rvol_1m":            tf.get("rvol_1m"),
+        "atr_1m":             tf.get("atr_1m"),
+        "schema_version":     1,
+    }
+    try:
+        await insert_features_1m(symbol, ts_min, feat)
+        _last_feat_min[key] = True
+    except Exception:
+        # keep loop resilient
+        pass
 
-    global _LAST_RUN, _last_feat_min, _view_refresh_counter
-    if "_last_feat_min" not in globals():
-        _last_feat_min = {}  # key: f"{symbol}:{YYYY-MM-DDTHH:MM}"
-    if "_view_refresh_counter" not in globals():
-        _view_refresh_counter = 0
-
+# -----------------------------------------------------------------------------
+# Main background loop (moved into a private runner)
+# -----------------------------------------------------------------------------
+async def _agents_forever():
+    global _view_refresh_counter
     while True:
         loop_start = time.time()
 
@@ -152,30 +121,15 @@ async def agents_loop():
                     # keep the loop healthy even if one agent fails
                     pass
 
-            # 2) Minute-close feature snapshot (once per minute per symbol)
+            # 2) Once-per-minute feature snapshot
             try:
-                ts_min = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-                key = f"{symbol}:{ts_min.isoformat(timespec='minutes')}"
-                if not _last_feat_min.get(key):
-                    tf = await compute_signals_tf(symbol)  # async
-                    feat = {
-                        "mom_bps_1m":         tf.get("mom_bps_1m"),
-                        "mom_bps_5m":         tf.get("mom_bps_5m"),
-                        "mom_bps_15m":        tf.get("mom_bps_15m"),
-                        "px_vs_vwap_bps_1m":  tf.get("px_vs_vwap_bps_1m"),
-                        "px_vs_vwap_bps_5m":  tf.get("px_vs_vwap_bps_5m"),
-                        "px_vs_vwap_bps_15m": tf.get("px_vs_vwap_bps_15m"),
-                        "rvol_1m":            tf.get("rvol_1m"),
-                        "atr_1m":             tf.get("atr_1m"),
-                        "schema_version":     1,
-                    }
-                    await insert_features_1m(symbol, ts_min, feat)
-                    _last_feat_min[key] = True
+                await _maybe_write_features(symbol)
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                # never let persistence hiccups break the loop
                 pass
 
-        # 3) Liveness breadcrumb
+        # 3) Heartbeat
         try:
             await heartbeat("scheduler")
         except Exception:
@@ -193,57 +147,9 @@ async def agents_loop():
         elapsed = time.time() - loop_start
         await asyncio.sleep(max(0.0, TICK_SEC - elapsed))
 
-
-async def agents_tick_once():
-    global _LAST_RUN
-    global _view_refresh_counter
-    loop_start = time.time()
-    for symbol in SYMBOLS:
-        try:
-            await flush_minute(symbol)
-        except Exception:
-            pass
-        try:
-            tf = await compute_signals_tf(symbol)
-            if tf:
-                now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-                await insert_features_1m(symbol, now, tf)
-        except Exception:
-            pass
-        try:
-            sig = await compute_signals(symbol)
-            px = sig.get("last_price") if isinstance(sig, dict) else None
-            if px:
-                now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-                await insert_bar_1m_stitched(symbol, now, float(px), sig.get("vwap"), None)
-        except Exception:
-            pass
-        for name, agent in AGENTS.items():
-            try:
-                await run_agent_once(agent, symbol, insert=True)
-                _LAST_RUN[name] = time.time()
-            except Exception:
-                pass
-    try:
-        await heartbeat("scheduler")
-    except Exception:
-        pass
-    try:
-        _view_refresh_counter = (_view_refresh_counter + 1) % 12
-        if _view_refresh_counter == 0:
-            await refresh_return_views()
-    except Exception:
-        pass
-
-async def _agents_forever():
-    while True:
-        try:
-            await agents_tick_once()
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        await asyncio.sleep(TICK_SEC)
-
+# -----------------------------------------------------------------------------
+# Supervising wrapper — restarts background loop with backoff
+# -----------------------------------------------------------------------------
 async def agents_loop():
     backoff = 1.0
     while True:
