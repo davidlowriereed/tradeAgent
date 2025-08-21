@@ -44,26 +44,22 @@ def _ssl_ctx():
         return ctx
     return ssl.create_default_context()
 
-async def connect_pool():
-    global _POOL
+# inside connect_pool()
+async with _LOCK:
     if _POOL is not None:
         return _POOL
-    async with _LOCK:
-        if _POOL is not None:
-            return _POOL
-        if asyncpg is None:
-            raise RuntimeError("asyncpg not installed")
-        _POOL = await asyncpg.create_pool(
-            dsn=_dsn(), 
-            ssl=_ssl_ctx(), 
-            timeout=DB_CONNECT_TIMEOUT_SEC, 
-            command_timeout=DB_CONNECT_TIMEOUT_SEC, 
-            min_size=1, 
-            max_size=5),
-        )
-          
-        # DO NOT run ensure_schema() here (boot orchestrator will)
-        return _POOL
+    if asyncpg is None:
+        raise RuntimeError("asyncpg not installed")
+    _POOL = await asyncpg.create_pool(
+        dsn=_dsn(),
+        ssl=_ssl_ctx(),
+        timeout=DB_CONNECT_TIMEOUT_SEC,
+        command_timeout=DB_CONNECT_TIMEOUT_SEC,
+        min_size=1,
+        max_size=5,
+    )
+    # DO NOT run ensure_schema() here (boot orchestrator will)
+    return _POOL
 
 # -------------------- Health --------------------
 async def db_health():
@@ -243,5 +239,7 @@ async def run_migrations_idempotent():
     async with pool.acquire() as conn:
         await conn.execute("SELECT pg_advisory_lock($1);", MIGRATIONS_LOCK_KEY)
         try:
-            finally:
+            # put idempotent DDL/DML here
+            pass
+        finally:
             await conn.execute("SELECT pg_advisory_unlock($1);", MIGRATIONS_LOCK_KEY)
