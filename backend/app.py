@@ -4,63 +4,45 @@ import os, json, time, asyncio
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, FileResponse
 
 from .config import SYMBOLS
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
+from .boot import BootOrchestrator, Stage
 from .state import RECENT_FINDINGS
-from .db import (
-    db_health as db_status,
-    connect_pool,
-    insert_finding_row,
-    fetch_recent_findings,
-    get_posture,
-    set_posture,
-    record_trade,
-    equity_curve,
-    ensure_schema_v2,
-)
-from .signals import compute_signals, compute_signals_tf
+from .db import db_health as db_status, connect_pool, insert_finding_row, fetch_recent_findings, get_posture, set_posture, record_trade, equity_curve
 
 app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
+
+boot: BootOrchestrator | None = None
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
-_last_step: dict[str, dict] = {}
+_last_step = {}
 
-@app.get("/")
-def root():
-    # If your dashboard is at backend/static/index.html
-    return RedirectResponse(url="/static/index.html")
+from .db import ensure_schema_v2
+from .scheduler import agents_loop
 
 @app.on_event("startup")
 async def _startup():
-    # 1) Ensure DB schema (non-fatal if it can't run)
-    try:
-        await ensure_schema_v2()   # idempotent, safe
-    except ModuleNotFoundError as e:
-        if "asyncpg" in str(e):
-            print("[schema] Skipping ensure_schema_v2: install 'asyncpg' to enable migrations")
-        else:
-            print("[schema] ensure_schema_v2 failed:", e)
-    except Exception as e:
-        print("[schema] ensure_schema_v2 failed:", e)
-
-    # 2) Kick off background agents loop (non-fatal if it can't start)
-    try:
-        asyncio.create_task(agents_loop())
-    except Exception as e:
-        print("[scheduler] failed to start agents_loop:", e)
-
+    global boot
+    async def db_connect(): 
+        await connect_pool()
+    async def migrate():    
+        await run_migrations_idempotent()
+    async def start_agents():
+        import asyncio as _asyncio
+        _asyncio.create_task(agents_loop())
+    boot = BootOrchestrator(
+        db_connect=db_connect,
+        run_migrations=migrate,
+        start_agents=start_agents,
+    )
+    import asyncio as _asyncio
+    _asyncio.create_task(boot.run())
 @app.get("/health")
 async def health():
-    try:
-        agents_map = list_agents_last_run()
-    except Exception:
-        agents_map = {}
-    return {"status":"ok","symbols":SYMBOLS,"agents":agents_map}
-
+    return {"status": "up"}
 @app.get("/db-health")
 async def db_health_route():
     try:
@@ -69,43 +51,18 @@ async def db_health_route():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-@app.get("/signals")
-async def signals(symbol: str):
-    """Return latest point-in-time signals; should never 400 even if empty."""
-    try:
-        res = await compute_signals(symbol)
-        return res or {"last_price": None, "symbol": symbol}
-    except Exception as e:
-        # Return neutral payload instead of 400 for empty caches
-        return {"last_price": None, "symbol": symbol, "error": str(e)}
-
-@app.get("/signals_tf")
-async def signals_tf(symbol: str):
-    """Return time-frame features; should never 400 even if empty."""
-    try:
-        res = await compute_signals_tf(symbol)
-        return res or {
-            "mom_bps_1m": None,
-            "px_vs_vwap_bps_1m": None,
-            "rvol_1m": None,
-            "atr_1m": None,
-            "symbol": symbol,
-        }
-    except Exception as e:
-        return {"symbol": symbol, "error": str(e)}
-
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
     rows = await fetch_recent_findings(symbol, limit)
     for f in rows:
-        if isinstance(f, dict) and isinstance(f.get("details"), str):
-            try:
-                f["details"] = json.loads(f["details"])
-            except Exception:
-                f["details"] = {"raw": f["details"]}
+        if isinstance(f, dict):
+            if isinstance(f.get("details"), str):
+                try:
+                    f["details"] = json.loads(f["details"])
+                except: f["details"] = {"raw": f["details"]}
     return {"findings": rows}
 
-AGENT_BY_NAME = AGENTS
+AGENT_BY_NAME = {a.name: a for a in AGENTS}
 
 @app.post("/agents/run-now")
 async def run_now(names: str, symbol: str, insert: bool = False):
@@ -136,13 +93,22 @@ async def sim_reset(symbol: str):
     await set_posture(symbol, "NO_POSITION", 0, None, "RESET")
     return {"ok": True}
 
-@app.post("/simulate/step")
-async def sim_step(symbol: str, payload: dict = Body(default=None)):
-    # Placeholder posture FSM: echo input and stamp time
-    now = datetime.now(timezone.utc).isoformat()
-    _last_step[symbol] = {"at": now, "payload": payload or {}}
-    return {"ok": True, "symbol": symbol, "at": now, "payload": payload or {}}
-
 @app.get("/simulate/equity")
 async def sim_equity(symbol: str):
     return await equity_curve(symbol)
+
+@app.get("/ready")
+async def ready():
+    st = boot.state if boot else None
+    agents_map = {}
+    try:
+        agents_map = list_agents_last_run()
+    except Exception:
+        pass
+    return {
+        "ready": bool(boot and boot.ready),
+        "stage": st.stage.value if st else "BOOTING",
+        "errors": st.errors if st else {},
+        "attempts": st.attempts if st else {},
+        "agents": agents_map,
+    }
