@@ -92,7 +92,28 @@ def resolve_agents(agents):
     # Otherwise assume these are agent objects with .name
     return {a.name: a for a in agents}
 
-AGENTS = resolve_agents(<your list from env or defaults>)
+ after: from .agents import REGISTRY
+
+def _agent_names_from_env() -> list[str]:
+    raw = os.getenv("AGENTS") or os.getenv("AGENT_NAMES")
+    if raw:
+        return [s.strip() for s in raw.split(",") if s.strip()]
+    # default set – use the names that exist in agents/__init__.py REGISTRY
+    return [
+        "trend_score",
+        "opening_drive",
+        "session_reversal",
+        "rvol_spike",
+        "cvd_divergence",
+        "llm_analyst",
+        "macro_watcher",
+        "posture_guard",
+    ]
+
+# Create instances from the registry
+AGENTS = [REGISTRY[name]() for name in _agent_names_from_env()]
+
+# Fast lookup for the /agents/run-now endpoint
 AGENT_BY_NAME = {a.name: a for a in AGENTS}
 
 @app.post("/agents/run-now")
