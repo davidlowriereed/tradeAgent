@@ -7,6 +7,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 from fastapi import Query
 from .startup_checks import verify_db_data, warm_caches
+import logging
 
 import os, json, asyncio
 from datetime import datetime, timezone
@@ -32,6 +33,9 @@ from .db import (
 from .scheduler import AGENTS
 from .agents import REGISTRY
 
+agents_task: asyncio.Task | None = None
+log = logging.getLogger("startup")
+
 app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -47,24 +51,41 @@ _last_step = {}
 
 @app.on_event("startup")
 async def startup():
-    global boot, agents_task
-    boot = BootOrchestrator()
+    # BootOrchestrator now *requires* these three keyword-only callbacks:
+    boot = BootOrchestrator(
+        db_connect=connect_pool,                   # create asyncpg pool
+        run_migrations=run_migrations_idempotent, # run idempotent migrations
+        start_agents=_start_agents,               # kick off agents loop
+    )
 
-    await boot.step(Stage.DB_POOL, connect_pool)
-    await boot.step(Stage.DB_MIGRATIONS, run_migrations_idempotent)
+    # If your class exposes a `run()` method, use it; otherwise fall back to explicit steps.
+    if hasattr(boot, "run") and callable(getattr(boot, "run")):
+        await boot.run()
+    else:
+        # Fallback for older BootOrchestrator API
+        await boot.step(Stage.DB_POOL, connect_pool)
+        await boot.step(Stage.DB_MIGRATIONS, run_migrations_idempotent)
+        await boot.step(Stage.AGENTS, _start_agents)
+        boot.ready = True
+        if hasattr(boot, "set_stage"):
+            boot.set_stage(Stage.READY)
+        if hasattr(Stage, "DB_VERIFY"):
+            await boot.step(Stage.DB_VERIFY, lambda: verify_db_data(min_total_rows=0))
+        if hasattr(Stage, "CACHE_WARMUP"):
+            await boot.step(Stage.CACHE_WARMUP, warm_caches)
 
-    # NEW: read from DB and prove SELECTs work (non-fatal if empty)
-    await boot.step(Stage.DB_VERIFY, lambda: verify_db_data(min_total_rows=0))
-
-    # NEW: optional cache warmup for dashboard
-    await boot.step(Stage.CACHE_WARMUP, warm_caches)
-
-    # start agents
+async def _start_agents():
+    """Start (or restart) the background agents loop."""
+    global agents_task
+    if agents_task and not agents_task.done():
+        agents_task.cancel()
+        try:
+            await agents_task
+        except Exception:
+            pass
     agents_task = asyncio.create_task(agents_loop())
-    await boot.step(Stage.AGENTS, lambda: None)
+    return "agents_started"
 
-    boot.ready = True
-    boot.set_stage(Stage.READY)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
