@@ -4,6 +4,7 @@ from __future__ import annotations
 import os, ssl, json, base64, asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
+from typing import Iterable, Tuple
 
 try:
     import asyncpg  # type: ignore
@@ -18,6 +19,57 @@ MIGRATIONS_LOCK_KEY: int = int(os.getenv("MIGRATIONS_LOCK_KEY", "2147483601"))
 
 _POOL: Optional["asyncpg.Pool"] = None
 _LOCK: "asyncio.Lock" = asyncio.Lock()
+
+
+async def table_counts(symbols: Iterable[str]) -> dict:
+    """
+    Return row counts for the key tables, both total and by symbol.
+    Works even when tables are empty.
+    """
+    sym_list = [s.strip() for s in symbols if s.strip()]
+    pool = await connect_pool()
+    out = {"bars_1m": {"total": 0, "by_symbol": {}},
+           "features_1m": {"total": 0, "by_symbol": {}},
+           "findings": {"total": 0, "by_symbol": {}}}
+
+    async with pool.acquire() as conn:
+        # totals
+        for tbl in ("bars_1m", "features_1m", "findings"):
+            out[tbl]["total"] = int(await conn.fetchval(f"select count(*) from {tbl}"))
+
+        # per symbol
+        for tbl in ("bars_1m", "features_1m", "findings"):
+            if sym_list:
+                rows = await conn.fetch(
+                    f"select symbol, count(*) c from {tbl} where symbol = any($1::text[]) group by symbol",
+                    sym_list,
+                )
+                out[tbl]["by_symbol"] = {r["symbol"]: int(r["c"]) for r in rows}
+    return out
+
+
+async def fetch_latest_feature_snapshot(symbol: str) -> dict | None:
+    """One-row snapshot for dashboard warmup; returns None if missing."""
+    pool = await connect_pool()
+    async with pool.acquire() as conn:
+        r = await conn.fetchrow(
+            """
+            select ts_utc, mom_bps_1m, px_vs_vwap_bps_1m, rvol_1m, atr_1m
+            from features_1m where symbol=$1
+            order by ts_utc desc limit 1
+            """,
+            symbol,
+        )
+    if not r:
+        return None
+    return {
+        "symbol": symbol,
+        "ts_utc": r["ts_utc"].isoformat() if r["ts_utc"] else None,
+        "mom_bps_1m": r["mom_bps_1m"],
+        "px_vs_vwap_bps_1m": r["px_vs_vwap_bps_1m"],
+        "rvol_1m": r["rvol_1m"],
+        "atr_1m": r["atr_1m"],
+    }
 
 
 # --- DSN / SSL helpers -------------------------------------------------------
