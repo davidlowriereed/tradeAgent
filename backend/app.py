@@ -6,6 +6,7 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 from fastapi import Query
+from .startup_checks import verify_db_data, warm_caches
 
 import os, json, asyncio
 from datetime import datetime, timezone
@@ -45,22 +46,25 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 _last_step = {}
 
 @app.on_event("startup")
-async def _startup():
-    global boot
-    async def db_connect(): 
-        await connect_pool()
-    async def migrate():    
-        await run_migrations_idempotent()
-    async def start_agents():
-        import asyncio as _asyncio
-        _asyncio.create_task(agents_loop())
-    boot = BootOrchestrator(
-        db_connect=db_connect,
-        run_migrations=migrate,
-        start_agents=start_agents,
-    )
-    import asyncio as _asyncio
-    _asyncio.create_task(boot.run())
+async def startup():
+    global boot, agents_task
+    boot = BootOrchestrator()
+
+    await boot.step(Stage.DB_POOL, connect_pool)
+    await boot.step(Stage.DB_MIGRATIONS, run_migrations_idempotent)
+
+    # NEW: read from DB and prove SELECTs work (non-fatal if empty)
+    await boot.step(Stage.DB_VERIFY, lambda: verify_db_data(min_total_rows=0))
+
+    # NEW: optional cache warmup for dashboard
+    await boot.step(Stage.CACHE_WARMUP, warm_caches)
+
+    # start agents
+    agents_task = asyncio.create_task(agents_loop())
+    await boot.step(Stage.AGENTS, lambda: None)
+
+    boot.ready = True
+    boot.set_stage(Stage.READY)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
