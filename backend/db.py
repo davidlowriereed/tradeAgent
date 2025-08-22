@@ -186,12 +186,36 @@ def _to_jsonb(value: Any) -> str:
         return json.dumps(value, separators=(",", ":"), default=str)
 
 
-async def heartbeat() -> str:
+async def heartbeat(*args, **kwargs) -> None:
+    """
+    Accepts either heartbeat(symbol, note) or heartbeat(agent='x', symbol='y', note='z')
+    and records a row in heartbeats.
+    """
+    # normalize inputs
+    agent  = kwargs.get("agent")
+    symbol = kwargs.get("symbol")
+    note   = kwargs.get("note")
+
+    if len(args) == 1 and agent is None:
+        # heartbeat("agent") form
+        agent = str(args[0])
+    elif len(args) == 2 and (symbol is None or note is None):
+        # heartbeat(symbol, note) form (agent unknown)
+        symbol, note = args[0], args[1]
+    elif len(args) == 3 and (agent is None or symbol is None or note is None):
+        # heartbeat(agent, symbol, note)
+        agent, symbol, note = args[0], args[1], args[2]
+
+    agent = str(agent) if agent is not None else "unspecified"
+    symbol = str(symbol) if symbol is not None else None
+    note = str(note) if note is not None else None
+
     pool = await connect_pool()
     async with pool.acquire() as conn:
-        ts = await conn.fetchval("select now()::text;")
-        return str(ts)
-
+        await conn.execute(
+            "insert into heartbeats(agent, symbol, note) values ($1, $2, $3)",
+            agent, symbol, note
+        )
 
 async def refresh_return_views() -> None:
     """
