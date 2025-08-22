@@ -7,8 +7,6 @@ from .cvd_divergence import CvdDivergenceAgent
 from .llm_analyst import LLMAnalystAgent
 from .macro_watcher import MacroWatcherAgent
 from .posture_guard import PostureGuardAgent
-from .momentum import MomentumAgent
-from .rvol import RvolAgent
 
 # map short names -> classes (not instances)
 REGISTRY = {
@@ -21,6 +19,7 @@ REGISTRY = {
     "macro_watcher": MacroWatcherAgent,
     "posture_guard": PostureGuardAgent,
 }
+
 
 
 
