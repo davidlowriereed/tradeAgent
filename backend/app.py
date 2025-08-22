@@ -227,3 +227,13 @@ async def ready():
         "attempts": st.attempts if st else {},
         "agents": agents_map,
     }
+
+@app.on_event("shutdown")
+async def shutdown():
+    global agents_task
+    if agents_task:
+        agents_task.cancel()
+        try:
+            await agents_task
+        except Exception:
+            pass
