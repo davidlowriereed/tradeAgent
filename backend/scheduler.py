@@ -3,7 +3,6 @@
 from __future__ import annotations
 from .agents import REGISTRY
 import asyncio, os, time, importlib
-from .agents import REGISTRY
 from typing import Dict, Optional
 from datetime import datetime, timezone
 
