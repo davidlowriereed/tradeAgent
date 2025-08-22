@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
+from fastapi import Query
 
 import os, json, asyncio
 from datetime import datetime, timezone
@@ -171,6 +172,20 @@ async def sim_reset(symbol: str):
 @app.get("/simulate/equity")
 async def sim_equity(symbol: str):
     return await equity_curve(symbol)
+
+@app.get("/signals")
+async def signals(symbol: str = Query(..., description="e.g. BTC-USD")):
+    # TODO: replace with real query once features_1m populated
+    return {"symbol": symbol, "last_price": None, "trend_p_up": None}
+
+@app.get("/signals_tf")
+async def signals_tf(symbol: str = Query(...)):
+    # TODO: replace with latest features_1m snapshot
+    return {
+        "symbol": symbol,
+        "mom_bps_1m": 0, "px_vs_vwap_bps_1m": 0,
+        "rvol_1m": 1.0, "atr_1m": 0
+    }
 
 @app.get("/ready")
 async def ready():
