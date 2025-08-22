@@ -14,11 +14,12 @@ REGISTRY = {
     "opening_drive": OpeningDriveReversalAgent,
     "session_reversal": SessionReversalAgent,
     "rvol_spike": RVOLSpikeAgent,
-    "cvd_divergence": CVDDivergenceAgent,
+    "cvd_divergence": CvdDivergenceAgent,
     "llm_analyst": LLMAnalystAgent,
     "macro_watcher": MacroWatcherAgent,
     "posture_guard": PostureGuardAgent,
 }
+
 
 
 
