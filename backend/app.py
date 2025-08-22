@@ -1,6 +1,11 @@
 # backend/app.py
 from __future__ import annotations
 
+from pathlib import Path
+from fastapi import Request
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse
+
 import os, json, asyncio
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,6 +23,12 @@ from .scheduler import AGENTS
 from .agents import REGISTRY
 
 app = FastAPI(title="Opportunity Radar", default_response_class=JSONResponse)
+
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 boot: BootOrchestrator | None = None
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
@@ -42,19 +53,25 @@ async def _startup():
     import asyncio as _asyncio
     _asyncio.create_task(boot.run())
 
-@app.get("/")
-async def root():
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+    
+@app.get("/health")
+async def health():
+    return {"status": "up"}
+
+@app.get("/status")
+async def status():
     st = boot.state if boot else None
     return {
         "status": "up",
         "ready": bool(boot and boot.ready),
         "stage": st.stage.value if st else "BOOTING",
+        "errors": st.errors if st else {},
+        "attempts": st.attempts if st else {},
     }
-    
-@app.get("/health")
-async def health():
-    return {"status": "up"}
-    
+
 @app.get("/db-health")
 async def db_health_route():
     try:
