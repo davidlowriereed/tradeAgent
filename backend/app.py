@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import SYMBOLS
+
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .boot import BootOrchestrator, Stage
 from .db import run_migrations_idempotent
@@ -92,7 +93,6 @@ def resolve_agents(agents):
     # Otherwise assume these are agent objects with .name
     return {a.name: a for a in agents}
 
- after: from .agents import REGISTRY
 
 def _agent_names_from_env() -> list[str]:
     raw = os.getenv("AGENTS") or os.getenv("AGENT_NAMES")
