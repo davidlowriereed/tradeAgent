@@ -1,5 +1,5 @@
 # backend/agents/__init__.py
-from .agents.trend_score import TrendScoreAgent
+from .trend_score import TrendScoreAgent
 from .opening_drive import OpeningDriveReversalAgent
 from .session_reversal import SessionReversalAgent
 from .rvol_spike import RVOLSpikeAgent
@@ -21,4 +21,5 @@ REGISTRY = {
     "macro_watcher": MacroWatcherAgent,
     "posture_guard": PostureGuardAgent,
 }
+
 
