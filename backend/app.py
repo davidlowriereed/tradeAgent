@@ -17,7 +17,15 @@ from .config import SYMBOLS
 
 from .scheduler import agents_loop, list_agents_last_run, AGENTS
 from .boot import BootOrchestrator, Stage
-from .db import run_migrations_idempotent
+from .db import (
+    run_migrations_idempotent,
+    db_health as db_status,            # <-- alias used by the /db-health route
+    connect_pool,
+    insert_finding_row,                # <-- used by /agents/run-now when insert=true
+    fetch_recent_findings,
+    set_posture,
+    equity_curve,
+)
 
 from .scheduler import AGENTS
 from .agents import REGISTRY
@@ -73,12 +81,10 @@ async def status():
     }
 
 @app.get("/db-health")
-async def db_health_route():
-    try:
-        res = await db_status()
-        return res if isinstance(res, dict) else {"ok": bool(res)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+async def db_health():
+    ok, mode, info = await db_status()         # db_status is the alias above
+    return {"ok": ok, "mode": mode, **(info or {})}
+
 
 @app.get("/findings")
 async def findings(symbol: Optional[str] = None, limit: int = 20):
