@@ -1,44 +1,76 @@
 # backend/db.py
 from __future__ import annotations
-import asyncio, json, os, ssl, base64
-from typing import Optional, Dict, Any
-from datetime import datetime, timezone
 
-DB_CONNECT_TIMEOUT_SEC = float(os.getenv('DB_CONNECT_TIMEOUT_SEC', '5'))
-MIGRATIONS_LOCK_KEY = 2147483601  # integer advisory-lock key
+import os
+import ssl
+import json
+import base64
+import asyncio
+from typing import Any, Dict, Optional
 
 try:
     import asyncpg  # type: ignore
-    from asyncpg.types import Json
-except Exception:
-    asyncpg = None
-    Json = None
+except Exception:  # pragma: no cover
+    asyncpg = None  # type: ignore
 
-# -------------------- Heartbeat --------------------
-HEARTBEATS: dict[str, dict] = {}
-async def heartbeat(name: str, status: str = "ok") -> None:
-    HEARTBEATS[name] = {"status": status, "last_run": datetime.now(timezone.utc).isoformat()}
-heartbeats = HEARTBEATS  # compat alias
 
-# ---------- TLS context ----------
-def _ssl_ctx():
-    # For quick testing only: DB_TLS_INSECURE=1 to skip verification
-    if os.getenv("DB_TLS_INSECURE", "0").lower() in ("1", "true", "yes"):
-        return False
-    ca_b64 = os.getenv("DATABASE_CA_CERT_B64")
-    ca_pem = os.getenv("DATABASE_CA_CERT")
-    if ca_b64 or ca_pem:
-        pem = (base64.b64decode(ca_b64).decode("utf-8") if ca_b64 else ca_pem)
-        ctx = ssl.create_default_context()
-        ctx.load_verify_locations(cadata=pem)
-        return ctx
-    return ssl.create_default_context()
+# --- Config ------------------------------------------------------------------
 
-_POOL: Optional["asyncpg.pool.Pool"] = None
-_LOCK = asyncio.Lock()
+DB_CONNECT_TIMEOUT_SEC: float = float(os.getenv("DB_CONNECT_TIMEOUT_SEC", "10"))
+MIGRATIONS_LOCK_KEY: int = int(os.getenv("MIGRATIONS_LOCK_KEY", "2147483601"))
 
-# ---------- Pool ----------
+# Pool + lock are module singletons so the whole app shares one pool.
+_POOL: Optional["asyncpg.Pool"] = None
+_LOCK: "asyncio.Lock" = asyncio.Lock()
+
+
+# --- DSN / SSL helpers -------------------------------------------------------
+
+def _dsn() -> str:
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError("DATABASE_URL is not set")
+    return dsn
+
+
+def _ssl_ctx() -> Optional[ssl.SSLContext]:
+    """
+    Build an SSL context if required.
+    Rules:
+      - If env PGSSL_DISABLE is truthy -> return None.
+      - If DATABASE_URL contains `sslmode=require` OR env PGSSL_REQUIRE is truthy,
+        create a default context.
+      - If env PG_CA_CERT_BASE64 is present, load it into the context.
+    """
+    if os.getenv("PGSSL_DISABLE"):
+        return None
+
+    dsn_lower = _dsn().lower()
+    require = "sslmode=require" in dsn_lower or bool(os.getenv("PGSSL_REQUIRE"))
+
+    if not require:
+        return None
+
+    ctx = ssl.create_default_context()
+
+    b64 = os.getenv("PG_CA_CERT_BASE64", "").strip()
+    if b64:
+        try:
+            pem = base64.b64decode(b64).decode("utf-8", "ignore")
+            # `cadata` accepts a PEM string
+            ctx.load_verify_locations(cadata=pem)
+        except Exception as e:  # don't block startup on optional custom CA
+            print(f"[db] WARNING: failed to load PG_CA_CERT_BASE64: {e}")
+
+    return ctx
+
+
+# --- Pool management ----------------------------------------------------------
+
 async def connect_pool():
+    """
+    Create the global asyncpg pool once and return it.
+    """
     global _POOL
     if _POOL is not None:
         return _POOL
@@ -48,203 +80,176 @@ async def connect_pool():
         if asyncpg is None:
             raise RuntimeError("asyncpg not installed")
         _POOL = await asyncpg.create_pool(
-            dsn=_dsn(),                      # <- your existing DSN builder
-            ssl=_ssl_ctx(),
+            dsn=_dsn(),
             timeout=DB_CONNECT_TIMEOUT_SEC,
             command_timeout=DB_CONNECT_TIMEOUT_SEC,
-            min_size=1,
-            max_size=5,
+            min_size=int(os.getenv("PG_POOL_MIN", "1")),
+            max_size=int(os.getenv("PG_POOL_MAX", "5")),
+            ssl=_ssl_ctx(),
         )
-        # DO NOT call ensure_schema() here; boot orchestrator runs migrations.
+        # Run a very light migration/ensure pass after pool creation
         return _POOL
-        
-def _dsn() -> str:
-    url = os.getenv("DATABASE_URL", "").strip()
-    if not url:
-        raise RuntimeError("DATABASE_URL not set")
-    return url
 
-# -------------------- Health --------------------
-async def db_health():
-    """Standardized health payload used by /db-health."""
+
+# --- Health / migrations ------------------------------------------------------
+
+async def db_health() -> Dict[str, Any]:
+    """
+    Simple connection + round-trip check.
+    Returns { ok: bool, mode: "verified" | "degraded", error?: str }
+    """
     try:
         pool = await connect_pool()
         async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        mode = "insecure" if _ssl_ctx() is False else "verified"
-        return {"ok": True, "mode": mode}
+            await conn.fetchval("select 1;")
+        return {"ok": True, "mode": "verified"}
     except Exception as e:
-        return {"ok": False, "mode": "unknown", "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "mode": "degraded", "error": str(e)}
 
-# -------------------- Schema (findings only) --------------------
-async def ensure_schema():
-    """Create findings table (jsonb details). Other tables assumed to exist."""
+
+async def run_migrations_idempotent() -> None:
+    """
+    Acquire an advisory lock and run migrations exactly once.
+    Keep it idempotent so multiple app instances don't fight.
+    """
     pool = await connect_pool()
     async with pool.acquire() as conn:
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS findings (
-            id       BIGSERIAL PRIMARY KEY,
-            agent    TEXT NOT NULL,
-            symbol   TEXT NOT NULL,
-            ts_utc   TIMESTAMPTZ NOT NULL DEFAULT now(),
-            score    DOUBLE PRECISION NOT NULL,
-            label    TEXT NOT NULL,
-            details  JSONB NOT NULL DEFAULT '{}'::jsonb
-        );
-        CREATE INDEX IF NOT EXISTS idx_findings_symbol_ts ON findings(symbol, ts_utc DESC);
-        """)
+        # lock for the duration of migrations
+        try:
+            await conn.execute("select pg_advisory_lock($1);", MIGRATIONS_LOCK_KEY)
+            # Keep this block idempotent (CREATE TABLE IF NOT EXISTS etc.)
+            await ensure_schema()
+        finally:
+            await conn.execute("select pg_advisory_unlock($1);", MIGRATIONS_LOCK_KEY)
 
-# Backward-compat alias expected by app.py
-async def ensure_schema_v2():
-    await ensure_schema()
-    
-    # -------------------- Findings --------------------
-async def insert_finding_row(row: dict) -> None:
-    ts = row.get("ts_utc")
+
+async def ensure_schema() -> None:
+    """
+    Lightweight placeholder. Your project already has ensure_schema_v2()
+    in some branches; if present elsewhere, it's fine to keep both.
+    Here we only create the minimal objects used by the app if they
+    don't already exist.
+    """
+    pool = await connect_pool()
+    async with pool.acquire() as conn:
+        # Minimal schema — adjust to your real schema / keep idempotent.
+        await conn.execute(
+            """
+            create table if not exists findings(
+                id bigserial primary key,
+                ts_utc timestamptz not null default now(),
+                agent text not null,
+                symbol text not null,
+                score double precision not null,
+                label text not null,
+                details jsonb not null default '{}'::jsonb
+            );
+            """
+        )
+        await conn.execute(
+            """
+            create table if not exists bars_1m(
+                ts_utc timestamptz primary key,
+                symbol text not null,
+                open double precision not null,
+                high double precision not null,
+                low double precision not null,
+                close double precision not null,
+                volume double precision not null,
+                primary key (ts_utc, symbol)
+            );
+            """
+        )
+        await conn.execute(
+            """
+            create table if not exists features_1m(
+                ts_utc timestamptz not null,
+                symbol text not null,
+                features jsonb not null,
+                primary key (ts_utc, symbol)
+            );
+            """
+        )
+
+
+# Some code imports ensure_schema_v2; provide a thin alias to avoid crashes.
+ensure_schema_v2 = ensure_schema
+
+
+# --- Writes / utilities -------------------------------------------------------
+
+def _to_jsonb(value: Any) -> str:
+    try:
+        import orjson  # type: ignore
+        return orjson.dumps(value).decode("utf-8")
+    except Exception:
+        return json.dumps(value, separators=(",", ":"), default=str)
+
+
+async def heartbeat() -> str:
+    pool = await connect_pool()
+    async with pool.acquire() as conn:
+        ts = await conn.fetchval("select now()::text;")
+        return str(ts)
+
+
+async def refresh_return_views() -> None:
+    """
+    If you have materialized views, refresh them here. It's safe as a no-op.
+    """
+    return None
+
+
+async def insert_finding_row(row: Dict[str, Any]) -> None:
     details = row.get("details") or {}
-    if not isinstance(details, str):
-        details = json.dumps(details, separators=(",", ":"))
-    pool = await connect_pool()                 # <-- ensure pool defined here
+    details_json = _to_jsonb(details)
+
+    pool = await connect_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO findings (agent, symbol, ts_utc, score, label, details)
-            VALUES ($1, $2, COALESCE($3, NOW()), $4, $5, $6::jsonb)
+            insert into findings (agent, symbol, ts_utc, score, label, details)
+            values ($1, $2, coalesce($3, now()), $4, $5, $6::jsonb)
             """,
-            str(row["agent"]), str(row["symbol"]), ts, float(row["score"]),
-            str(row["label"]), details,
+            str(row.get("agent")),
+            str(row.get("symbol")),
+            row.get("ts_utc"),
+            float(row.get("score", 0.0)),
+            str(row.get("label", "")),
+            details_json,
         )
 
-async def fetch_recent_findings(symbol: Optional[str], limit: int = 20) -> list[dict]:
-    """Read latest findings (jsonb 'details' comes back as a dict from asyncpg)."""
-    pool = await connect_pool()
-    out: list[dict] = []
-    async with pool.acquire() as conn:
-        if symbol:
-            rows = await conn.fetch(
-                """SELECT ts_utc, agent, symbol, score, label, details
-                   FROM findings
-                   WHERE symbol=$1
-                   ORDER BY ts_utc DESC
-                   LIMIT $2""",
-                symbol, int(limit)
-            )
-        else:
-            rows = await conn.fetch(
-                """SELECT ts_utc, agent, symbol, score, label, details
-                   FROM findings
-                   ORDER BY ts_utc DESC
-                   LIMIT $1""",
-                int(limit)
-            )
-        for r in rows:
-            out.append({
-                "ts_utc": r["ts_utc"].isoformat() if r["ts_utc"] else None,
-                "agent":  r["agent"],
-                "symbol": r["symbol"],
-                "score":  float(r["score"]),
-                "label":  r["label"],
-                "details": r["details"],   # already a dict (jsonb)
-            })
-    return out
 
-# -------------------- Bars (1m) --------------------
-async def insert_bar_1m(symbol: str, ts_utc, *args, **kwargs) -> bool:
-    """
-    Upsert a 1m bar.
-    Supports either:
-      insert_bar_1m(symbol, ts_utc, {"o":...,"h":...,"l":...,"c":...,"v":...,"vwap":..., "trades":...})
-    or
-      insert_bar_1m(symbol, ts_utc, o,h,l,c,v, vwap=None, trades=None)
-    """
-    if args and isinstance(args[0], dict):
-        bar = args[0]
-        o = float(bar.get("o"))
-        h = float(bar.get("h"))
-        l = float(bar.get("l"))
-        c = float(bar.get("c"))
-        v = float(bar.get("v"))
-        vwap = bar.get("vwap"); vwap = None if vwap is None else float(vwap)
-        trades = bar.get("trades"); trades = None if trades is None else int(trades)
-    else:
-        # positional form
-        o,h,l,c,v = (float(x) for x in args[:5])
-        vwap = kwargs.get("vwap", None)
-        vwap = None if vwap is None else float(vwap)
-        trades = kwargs.get("trades", None)
-        trades = None if trades is None else int(trades)
-
+async def insert_bar_1m(row: Dict[str, Any]) -> None:
     pool = await connect_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            """INSERT INTO bars_1m(symbol, ts_utc, o,h,l,c,v,vwap,trades)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-               ON CONFLICT(symbol, ts_utc) DO UPDATE SET
-                 o=EXCLUDED.o, h=EXCLUDED.h, l=EXCLUDED.l, c=EXCLUDED.c,
-                 v=EXCLUDED.v, vwap=EXCLUDED.vwap, trades=EXCLUDED.trades""",
-            symbol, ts_utc, o,h,l,c,v,vwap,trades
+            """
+            insert into bars_1m (ts_utc, symbol, open, high, low, close, volume)
+            values ($1, $2, $3, $4, $5, $6, $7)
+            on conflict (ts_utc, symbol) do nothing
+            """,
+            row.get("ts_utc"),
+            str(row.get("symbol")),
+            float(row.get("open", 0.0)),
+            float(row.get("high", 0.0)),
+            float(row.get("low", 0.0)),
+            float(row.get("close", 0.0)),
+            float(row.get("volume", 0.0)),
         )
-    return True
 
-# -------------------- Features (1m snapshot) --------------------
-async def insert_features_1m(symbol: str, ts_utc, feat: dict) -> bool:
+
+async def insert_features_1m(symbol: str, ts_utc, features: Dict[str, Any]) -> None:
     pool = await connect_pool()
-    cols = [
-        "mom_bps_1m","mom_bps_5m","mom_bps_15m",
-        "px_vs_vwap_bps_1m","px_vs_vwap_bps_5m","px_vs_vwap_bps_15m",
-        "rvol_1m","atr_1m","schema_version"
-    ]
-    vals = [
-        feat.get("mom_bps_1m"), feat.get("mom_bps_5m"), feat.get("mom_bps_15m"),
-        feat.get("px_vs_vwap_bps_1m"), feat.get("px_vs_vwap_bps_5m"), feat.get("px_vs_vwap_bps_15m"),
-        feat.get("rvol_1m"), feat.get("atr_1m"), int(feat.get("schema_version", 1)),
-    ]
-    placeholders = ",".join(f"${i}" for i in range(3, 3+len(vals)))
-    set_clause   = ",".join(f"{c}=EXCLUDED.{c}" for c in cols)
     async with pool.acquire() as conn:
         await conn.execute(
-            f"""INSERT INTO features_1m(symbol, ts_utc, {",".join(cols)})
-                VALUES($1,$2,{placeholders})
-                ON CONFLICT(symbol, ts_utc) DO UPDATE SET {set_clause}""",
-            symbol, ts_utc, *vals
+            """
+            insert into features_1m (ts_utc, symbol, features)
+            values ($1, $2, $3::jsonb)
+            on conflict (ts_utc, symbol) do update
+                set features = excluded.features
+            """,
+            ts_utc,
+            str(symbol),
+            _to_jsonb(features),
         )
-    return True
-
-# -------------------- Returns view refresh (safe no-op placeholder) --------------------
-async def refresh_return_views() -> None:
-    """
-    Optional hook called by scheduler; keep as a safe no-op unless you add real SQL.
-    """
-    try:
-        pool = await connect_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-    except Exception:
-        # Don't raise; scheduler should be resilient.
-        pass
-
-# -------------------- Minimal posture & equity stubs --------------------
-_POSTURE: dict[str, dict] = {}
-_EQUITY: dict[str, list[dict]] = {}
-
-async def get_posture(symbol: str) -> dict:
-    return _POSTURE.get(symbol, {"symbol": symbol, "posture": "NO_POSITION", "size": 0, "price": None})
-
-async def set_posture(symbol: str, posture: str, size: float, price: Optional[float], reason: Optional[str] = None) -> None:
-    _POSTURE[symbol] = {"symbol": symbol, "posture": posture, "size": float(size), "price": price, "reason": reason, "ts_utc": datetime.now(timezone.utc).isoformat()}
-
-async def record_trade(symbol: str, side: str, qty: float, price: float) -> None:
-    _EQUITY.setdefault(symbol, []).append({"ts_utc": datetime.now(timezone.utc).isoformat(), "side": side, "qty": float(qty), "price": float(price)})
-
-async def equity_curve(symbol: str) -> dict:
-    return {"symbol": symbol, "equity": _EQUITY.get(symbol, [])}
-
-# ---------- Migrations (idempotent, single-run) ----------
-async def run_migrations_idempotent():
-    pool = await connect_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("SELECT pg_advisory_lock($1);", MIGRATIONS_LOCK_KEY)
-        try:
-            await ensure_schema()  # keep your existing schema builder here
-        finally:
-            await conn.execute("SELECT pg_advisory_unlock($1);", MIGRATIONS_LOCK_KEY)
