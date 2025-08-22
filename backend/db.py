@@ -223,6 +223,77 @@ async def insert_features_1m(symbol: str, ts_utc, feat: Dict[str, Any]) -> None:
             symbol, ts_utc, *vals
         )
 
+def _parse_cmd_tuples(cmd: str) -> int:
+    """asyncpg returns e.g. 'INSERT 0 123'; return the trailing int if present."""
+    try:
+        return int(cmd.split()[-1])
+    except Exception:
+        return 0
+
+async def refresh_return_views(
+    symbol: str | None = None,
+    lookback_minutes: int = 7 * 24 * 60,   # default 7d
+    as_bps: bool = False,                  # if True, store basis points instead of fraction
+) -> dict:
+    """
+    Upsert forward returns using 1m closes:
+      ret_5m  = (close[t+5]  - close[t]) / close[t]
+      ret_15m = (close[t+15] - close[t]) / close[t]
+    Only rows with a defined forward close are written.
+    """
+    interval_str = f"{max(lookback_minutes, 0)} minutes"
+    scale = 10000.0 if as_bps else 1.0
+
+    pool = await connect_pool()
+    async with pool.acquire() as conn:
+        # 5-minute forward return
+        cmd5 = await conn.execute(
+            """
+            with base as (
+              select symbol, ts_utc, c,
+                     lead(c, 5) over (partition by symbol order by ts_utc) as c_fwd
+              from bars_1m
+              where ts_utc >= now() - $1::interval
+                and ($2::text is null or symbol = $2)
+            )
+            insert into returns_5m(symbol, ts_utc, ret_5m)
+            select symbol, ts_utc, (($3 * (c_fwd - c)) / nullif(c, 0))
+            from base
+            where c_fwd is not null
+            on conflict (symbol, ts_utc) do update
+              set ret_5m = excluded.ret_5m;
+            """,
+            interval_str, symbol, scale,
+        )
+
+        # 15-minute forward return
+        cmd15 = await conn.execute(
+            """
+            with base as (
+              select symbol, ts_utc, c,
+                     lead(c, 15) over (partition by symbol order by ts_utc) as c_fwd
+              from bars_1m
+              where ts_utc >= now() - $1::interval
+                and ($2::text is null or symbol = $2)
+            )
+            insert into returns_15m(symbol, ts_utc, ret_15m)
+            select symbol, ts_utc, (($3 * (c_fwd - c)) / nullif(c, 0))
+            from base
+            where c_fwd is not null
+            on conflict (symbol, ts_utc) do update
+              set ret_15m = excluded.ret_15m;
+            """,
+            interval_str, symbol, scale,
+        )
+
+    return {
+        "upserted_5m": _parse_cmd_tuples(cmd5),
+        "upserted_15m": _parse_cmd_tuples(cmd15),
+        "units": "bps" if as_bps else "fraction",
+        "symbol": symbol,
+        "lookback_minutes": lookback_minutes,
+    }
+
 # --- Minimal posture/equity stubs used by simulate endpoints -------------------
 _POSTURE: dict[str, dict] = {}
 _EQUITY: dict[str, list[dict]] = {}
